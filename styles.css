@@ -50,6 +50,11 @@ body {
 .view {
   flex: 1;
   overflow-y: auto;
+  /* Крупный системный шрифт не уводит контент вбок: длинные слова переносятся
+     (h1, .quick__item), ряд настроения встаёт в несколько строк, а остаток
+     ширины обрезается без полосы прокрутки. Проверено браузерным стражем
+     «200 %»: scrollWidth <= clientWidth и у документа, и у .view. */
+  overflow-x: clip;
   -webkit-overflow-scrolling: touch;
   padding: calc(env(safe-area-inset-top) + 20px) var(--pad)
     calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 30px);
@@ -80,6 +85,11 @@ h1 {
   font-weight: 600;
   margin: 0 0 4px;
   letter-spacing: -0.015em;
+  /* При системном шрифте 200 % длинное слово («Физиологический») не должно
+     быть шире колонки: перенос по слогам работает, потому что у <html> есть
+     lang="ru", а break-word страхует там, где словарь не помог. */
+  hyphens: auto;
+  overflow-wrap: break-word;
 }
 
 h2 {
@@ -197,6 +207,11 @@ button {
   border: 1px solid var(--line);
   font-size: 15px;
   line-height: 1.3;
+  /* Причина прежних 15 px вбок: «Заземление» при 200 % шире колонки 155 px
+     и не переносилось. anywhere (а не break-word) ещё и уменьшает
+     min-content, поэтому колонка сетки не растягивается под слово. */
+  hyphens: auto;
+  overflow-wrap: anywhere;
 }
 
 .quick__item:active {
@@ -569,7 +584,9 @@ input:focus {
 
 textarea::placeholder,
 input::placeholder {
-  color: #5a6b6f;
+  /* 4,75 : 1 на --surface #172025 (было #5a6b6f — 2,97 : 1). Фон полей
+     не меняется: правится только цвет подсказки. */
+  color: #7a8d8f;
 }
 
 .field-block {
@@ -658,11 +675,15 @@ input::placeholder {
 
 .mood {
   display: flex;
+  flex-wrap: wrap;
   gap: 7px;
   margin-bottom: 18px;
 }
 
 .mood__btn {
+  /* flex: 1 — равные по ширине кнопки, как были. При системном шрифте 200 %
+     ширина не опускается ниже слова («спокойно»), и ряд переносится сам:
+     на 360 px 4 + 1, на 320 px 3 + 2, все целиком в экране. */
   flex: 1;
   padding: 13px 3px 11px;
   border-radius: 14px;
@@ -847,7 +868,11 @@ input::placeholder {
   bottom: 0;
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+  /* Высота по содержимому: при системном шрифте 200 % подписи становятся
+     выше, и полоса растёт вместе с ними вместо обрезки краем экрана.
+     При обычном кегле min-height даёт те же 62 px, что и раньше. */
+  height: auto;
+  min-height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
   padding-bottom: env(safe-area-inset-bottom);
   background: rgba(15, 20, 24, 0.93);
   backdrop-filter: blur(16px);
@@ -867,6 +892,15 @@ input::placeholder {
   color: #7a8f91;
   padding: 8px 2px;
   transition: color 0.15s;
+}
+
+.tab span {
+  /* Подпись не шире своей колонки: при 200 % длинное слово переносится,
+     а не уезжает за край экрана. */
+  max-width: 100%;
+  text-align: center;
+  hyphens: auto;
+  overflow-wrap: break-word;
 }
 
 .tab svg {
