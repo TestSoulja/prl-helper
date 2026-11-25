@@ -1,5 +1,5 @@
 /* Офлайн-кэш. Меняй VERSION при обновлении файлов. */
-const VERSION = 'opora-v0.8.4';
+const VERSION = 'opora-v0.8.5';
 
 const SHELL = [
   './',
@@ -21,11 +21,32 @@ const SHELL = [
   './icons/apple-touch-icon.png',
 ];
 
+/**
+ * Свой кэш по имени, а не «любой найденный».
+ *
+ * `caches.match()` ищет по всем кэшам и отдаёт первый по порядку создания.
+ * Пока новое поколение ставится, рядом лежит старое — и файл может прийти
+ * из чужого. 25.11.2026 это дало экран, где «Версия 0.8.4» стояла рядом
+ * с кодом 0.8.2: HTML пришёл по сети, а `app.js` — из старого кэша.
+ */
+const own = () => caches.open(VERSION);
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches
-      .open(VERSION)
-      .then((cache) => cache.addAll(SHELL))
+    own()
+      .then((cache) =>
+        Promise.all(
+          SHELL.map((url) =>
+            // `cache: 'reload'` — мимо кэша браузера: у Pages
+            // `Cache-Control: max-age=600`, и новый кэш иначе мог бы
+            // получить байты прошлой версии и остаться с ними навсегда.
+            fetch(new Request(url, { cache: 'reload' })).then((res) => {
+              if (!res.ok) throw new Error(`${url}: ${res.status}`);
+              return cache.put(url, res);
+            }),
+          ),
+        ),
+      )
       .then(() => self.skipWaiting()),
   );
 });
@@ -47,24 +68,31 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
 
-  // Навигация всегда отдаёт оболочку — приложение работает офлайн.
+  const fromOwn = (key) => own().then((cache) => cache.match(key));
+
+  // Оболочка — из своего кэша: HTML и код всегда одного поколения, и старт
+  // не ждёт сети (в накат это секунды). Новое поколение приходит через
+  // обновление service worker, а не вперемешку с ним.
   if (req.mode === 'navigate') {
     event.respondWith(
-      fetch(req).catch(() => caches.match('./index.html').then((r) => r || Response.error())),
+      fromOwn('./index.html').then((hit) => hit || fetch(req).catch(() => Response.error())),
     );
     return;
   }
 
   event.respondWith(
-    caches.match(req).then((hit) => {
+    fromOwn(req).then((hit) => {
       if (hit) return hit;
       return fetch(req)
         .then((res) => {
-          const copy = res.clone();
-          caches.open(VERSION).then((cache) => cache.put(req, copy));
+          if (res.ok) {
+            const copy = res.clone();
+            // Запись не теряется, если worker усыпят сразу после ответа.
+            event.waitUntil(own().then((cache) => cache.put(req, copy)));
+          }
           return res;
         })
-        .catch(() => caches.match('./index.html').then((r) => r || Response.error()));
+        .catch(() => fromOwn('./index.html').then((r) => r || Response.error()));
     }),
   );
 });
