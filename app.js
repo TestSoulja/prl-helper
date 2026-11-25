@@ -4,6 +4,9 @@ import {
   TRIAGE,
   CRISIS_FIELDS,
   DEFAULT_CONTACTS,
+  LEGACY_CONTACTS,
+  KIDS_TITLE,
+  KIDS_CONTACTS,
   MOOD_WORDS,
   MOOD_TAGS,
   SAFETY_NOTE,
@@ -20,10 +23,18 @@ import {
   CALM_LINE,
   CALM_EXIT,
   CALM_MINUTES,
-  EXPORT_BUTTON,
+  EXPORT_SHARE_BUTTON,
+  EXPORT_DOWNLOAD_BUTTON,
+  EXPORT_NOTE_SHARE,
   EXPORT_NOTE,
+  EXPORT_SHARE_DONE,
+  EXPORT_SHARE_FAILED,
+  EXPORT_SHARE_UNAVAILABLE,
+  EXPORT_FALLBACK_BUTTON,
+  EXPORT_FALLBACK_NOTE,
   EXPORT_DONE,
   EXPORT_FAILED,
+  EXPORT_DEBUG,
   IMPORT_BUTTON,
   IMPORT_RESULT,
   IMPORT_ERR_JSON,
@@ -48,6 +59,11 @@ import {
   parseImport,
   importCounts,
   exportName,
+  copyTarget,
+  shareOutcome,
+  refreshDefaultContacts,
+  COPY_SHARE,
+  COPY_UNAVAILABLE,
 } from './store.js';
 import { readData, writeData, clearData } from './db.js';
 
@@ -99,6 +115,31 @@ function load() {
 
 let data = load();
 
+/**
+ * Контакты, сохранённые старыми версиями: у 112 и линии МЧС подписи
+ * были другие, в том числе «только если ты в Москве». Правим только
+ * нетронутые заводские записи — то, что человек написал сам, остаётся.
+ */
+function migrateContacts() {
+  const next = refreshDefaultContacts(data.contacts, DEFAULT_CONTACTS, LEGACY_CONTACTS);
+  if (JSON.stringify(next) === JSON.stringify(data.contacts)) return false;
+  data.contacts = next;
+  return true;
+}
+
+/** Миграция подписей и запись в оба хранилища. true — если что-то поменялось. */
+function migrateContactsAndSave() {
+  if (!migrateContacts()) return false;
+  data.ts = Date.now();
+  try {
+    localStorage.setItem(KEY, JSON.stringify(data));
+  } catch {
+    /* приватный режим — вторая копия ниже всё равно попробует */
+  }
+  writeData(data);
+  return true;
+}
+
 function markUsed() {
   try {
     localStorage.setItem(SEEN, '1');
@@ -144,6 +185,7 @@ async function hydrate() {
 
   if (!second) {
     if (!isDataEmpty(data)) writeData(data);
+    if (migrateContactsAndSave()) render();
     return;
   }
 
@@ -152,7 +194,11 @@ async function hydrate() {
   const merged = hadLocal
     ? mergeData(data, normalize(second))
     : mergeData(normalize(second), data);
-  if (JSON.stringify(merged) === JSON.stringify(data)) return;
+  if (JSON.stringify(merged) === JSON.stringify(data)) {
+    // копии совпали, но старая подпись заводских контактов могла остаться
+    if (migrateContactsAndSave()) render();
+    return;
+  }
 
   data = merged;
   try {
@@ -161,6 +207,7 @@ async function hydrate() {
     /* ничего страшного: в IndexedDB уже лежит */
   }
   writeData(data);
+  migrateContactsAndSave();
   render();
 }
 
@@ -180,6 +227,10 @@ let skillCtx = null;
 let notice = '';
 // защищено ли хранилище от очистки: null — ещё не узнали
 let persisted = null;
+// «Поделиться» не сработало: нужна отдельная кнопка «сохранить файл»
+let needFallback = false;
+// имя ошибки share для строки ?debug=1
+let shareError = '';
 
 const TAB_OF = { home: 'home', breath: 'breath', card: 'card', diary: 'diary' };
 
@@ -331,9 +382,6 @@ const SCREENS = {
           </button>
           <button class="quick__item" data-act="go" data-screen="skill" data-id="ground5">
             Заземление<span>3 минуты</span>
-          </button>
-          <button class="quick__item" data-act="go" data-screen="skill" data-id="cold">
-            Холод<span>1 минута</span>
           </button>
           <button class="quick__item" data-act="go" data-screen="skill" data-id="quiet">
             Пауза<span>1 минута</span>
@@ -679,20 +727,10 @@ const SCREENS = {
         <button class="back" data-act="back">‹ назад</button>
         <header class="head">
           <h1>Контакты</h1>
-          <p class="lead">Нажми, чтобы позвонить. Номера проверь под свой город.</p>
         </header>
-        ${data.contacts
-          .map(
-            (c) => `
-          <a class="contact" href="tel:${esc(dialable(c.phone))}">
-            <div class="contact__body">
-              <div class="contact__name">${esc(c.label)}</div>
-              ${c.note ? `<div class="contact__note">${esc(c.note)}</div>` : ''}
-            </div>
-            <div class="contact__call">позвонить</div>
-          </a>`,
-          )
-          .join('')}
+        ${data.contacts.map(contactLink).join('')}
+        <h2 class="section">${esc(KIDS_TITLE)}</h2>
+        ${KIDS_CONTACTS.map(contactLink).join('')}
         <button class="btn" data-act="contacts-edit">Изменить список</button>
         ${messagesBlock()}
       </div>`;
@@ -782,11 +820,13 @@ const SCREENS = {
           <button class="grid__btn" data-act="go" data-screen="contacts">Контакты и звонки</button>
           <button class="grid__btn" data-act="go" data-screen="about">О приложении</button>
           <button class="grid__btn" data-act="install">Установить на телефон</button>
-          <button class="grid__btn" data-act="export">${esc(EXPORT_BUTTON)}</button>
+          <button class="grid__btn" data-act="export">${esc(copyLabel())}</button>
           <button class="grid__btn" data-act="import">${esc(IMPORT_BUTTON)}</button>
         </div>
-        <p class="hint">${esc(EXPORT_NOTE)}</p>
+        <p class="hint">${esc(copyNote())}</p>
         ${statusBlock()}
+        ${fallbackBlock()}
+        ${debugBlock()}
         <div class="persist">
           <div class="persist__row">
             <span>${esc(PERSIST_LABEL)}</span>
@@ -847,6 +887,17 @@ function skillCard(id, weak = false) {
       ${s.lead ? `<div class="card__lead">${esc(s.lead)}</div>` : ''}
       ${weak ? `<div class="card__weak">${esc(WEAK_LABEL)}</div>` : ''}
     </button>`;
+}
+
+function contactLink(c) {
+  return `
+    <a class="contact" href="tel:${esc(dialable(c.phone))}">
+      <div class="contact__body">
+        <div class="contact__name">${esc(c.label)}</div>
+        ${c.note ? `<div class="contact__note">${esc(c.note)}</div>` : ''}
+      </div>
+      <div class="contact__call">позвонить</div>
+    </a>`;
 }
 
 function messagesBlock() {
@@ -949,46 +1000,141 @@ async function applyImport(file) {
   const { fresh, existed } = importCounts(data, merged);
   data = merged;
   save();
+  // старый файл мог принести прежние подписи 112 и линии МЧС
+  migrateContactsAndSave();
   notice = IMPORT_RESULT.replace('{n}', String(fresh)).replace('{m}', String(existed));
   render();
 }
 
 /**
- * Копия файла: на телефоне — «Поделиться» (это и есть пересылка себе
- * в избранное), иначе обычное скачивание. Имя — слаг и дата, без
- * русских слов: файл может уехать в чужой чат.
+ * Копия файла. Ветка выбирается по устройству, а не по факту успеха:
+ * телефон — сразу «Поделиться» (цель — переслать, а не сохранить),
+ * десктоп — скачивание. Имя — слаг и дата, без русских слов: файл
+ * может уехать в чужой чат.
  */
-async function saveCopy() {
+function makeCopyFile() {
   const payload = buildExport(data, SITE_VERSION);
   const name = exportName(new Date());
   const file = new File([JSON.stringify(payload, null, 2)], name, {
     type: 'application/json',
   });
+  return { name, file };
+}
 
-  if (navigator.canShare?.({ files: [file] })) {
-    try {
-      await navigator.share({ files: [file] });
-      notice = EXPORT_DONE;
-      render();
-      return;
-    } catch (e) {
-      if (e?.name === 'AbortError') return;
-      /* не вышло поделиться — ниже обычное скачивание */
-    }
-  }
-
+function isTouchDevice() {
   try {
+    if (navigator.maxTouchPoints > 0) return true;
+    return matchMedia('(pointer: coarse)').matches;
+  } catch {
+    return false;
+  }
+}
+
+function currentCopyTarget() {
+  return copyTarget({
+    touch: isTouchDevice(),
+    hasShare: typeof navigator.share === 'function',
+  });
+}
+
+// Подпись — по устройству: на телефоне кнопка зовёт переслать, даже если
+// браузер этого не умеет. Тогда нажатие честно объяснит и даст фолбэк,
+// а не пообещает «сохранить» и не сохранит.
+function copyLabel() {
+  return isTouchDevice() ? EXPORT_SHARE_BUTTON : EXPORT_DOWNLOAD_BUTTON;
+}
+
+function copyNote() {
+  return isTouchDevice() ? EXPORT_NOTE_SHARE : EXPORT_NOTE;
+}
+
+/* Диагностика: без неё причину на чужом телефоне не узнать. */
+function debugEnabled() {
+  try {
+    return new URLSearchParams(location.search).get('debug') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function canShareProbe() {
+  try {
+    if (typeof navigator.canShare !== 'function') return 'нет метода';
+    return navigator.canShare({ files: [makeCopyFile().file] }) ? 'true' : 'false';
+  } catch {
+    return 'ошибка';
+  }
+}
+
+function debugBlock() {
+  if (!debugEnabled()) return '';
+  const row = [
+    `share: ${typeof navigator.share}`,
+    `canShare(files): ${canShareProbe()}`,
+    `maxTouchPoints: ${navigator.maxTouchPoints ?? '?'}`,
+    `ветка: ${currentCopyTarget()}`,
+    `ошибка: ${shareError || '—'}`,
+  ];
+  return `<p class="debug">${esc(EXPORT_DEBUG)}: ${esc(row.join(' · '))}</p>`;
+}
+
+/* Явный фолбэк после неудачи share — единственный путь к файлу. */
+function fallbackBlock() {
+  if (!needFallback) return '';
+  return `
+    <button class="btn btn--ghost btn--small" data-act="export-download">
+      ${esc(EXPORT_FALLBACK_BUTTON)}
+    </button>
+    <p class="hint">${esc(EXPORT_FALLBACK_NOTE)}</p>`;
+}
+
+async function shareCopy() {
+  const { file } = makeCopyFile();
+  try {
+    await navigator.share({ files: [file] });
+  } catch (e) {
+    // человек сам закрыл лист — это нормально, экран не трогаем
+    if (shareOutcome(e) === 'silent') return;
+    shareError = e?.name || 'без имени';
+    needFallback = true;
+    notice = EXPORT_SHARE_FAILED;
+    render();
+    return;
+  }
+  shareError = '';
+  needFallback = false;
+  notice = EXPORT_SHARE_DONE;
+  render();
+}
+
+function downloadCopy() {
+  try {
+    const { name, file } = makeCopyFile();
     const url = URL.createObjectURL(file);
     const a = document.createElement('a');
     a.href = url;
     a.download = name;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
+    needFallback = false;
     notice = EXPORT_DONE;
   } catch {
     notice = EXPORT_FAILED;
   }
   render();
+}
+
+async function saveCopy() {
+  const target = currentCopyTarget();
+  if (target === COPY_SHARE) return shareCopy();
+  if (target === COPY_UNAVAILABLE) {
+    shareError = 'нет метода share';
+    needFallback = true;
+    notice = EXPORT_SHARE_UNAVAILABLE;
+    render();
+    return;
+  }
+  downloadCopy();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1413,6 +1559,10 @@ document.addEventListener('click', async (e) => {
 
     case 'export':
       await saveCopy();
+      break;
+
+    case 'export-download':
+      downloadCopy();
       break;
 
     case 'import': {

@@ -235,6 +235,13 @@ button {
   color: var(--danger);
 }
 
+/* Мелкая кнопка: явный фолбэк, а не второй большой путь. */
+.btn--small {
+  padding: 11px 14px;
+  font-size: 15px;
+  margin-top: 12px;
+}
+
 .back {
   display: inline-block;
   color: var(--muted);
@@ -584,6 +591,15 @@ input::placeholder {
 /* ------------------------------------------------------------------ */
 /*  Контакты                                                          */
 /* ------------------------------------------------------------------ */
+
+/* Подзаголовок блока «детям и родителям» — не в ряду «позвони себе». */
+.section {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  margin: 22px 0 10px;
+}
 
 .contact {
   display: flex;
@@ -1053,6 +1069,16 @@ input::placeholder {
   font-size: 17px;
   line-height: 1.4;
   color: var(--accent);
+}
+
+/* ?debug=1: причина, почему share не сработал, на чужом телефоне. */
+.debug {
+  margin: 10px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+  word-break: break-word;
 }
 
 .restore {

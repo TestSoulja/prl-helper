@@ -182,6 +182,34 @@ export function buildExport(raw, version, date = new Date()) {
   };
 }
 
+/* ------------------------------------------------------------------ */
+/*  Как отдать копию                                                   */
+/* ------------------------------------------------------------------ */
+export const COPY_SHARE = 'share';
+export const COPY_DOWNLOAD = 'download';
+export const COPY_UNAVAILABLE = 'unavailable';
+
+/**
+ * Ветка выбирается по устройству, а не по факту успеха: на телефоне
+ * цель — переслать, на десктопе — скачать. Если тач есть, а делиться
+ * браузер не умеет, это честный отказ с одной явной кнопкой-фолбэком,
+ * а не тихое скачивание.
+ */
+export function copyTarget({ touch = false, hasShare = false } = {}) {
+  if (!touch) return COPY_DOWNLOAD;
+  return hasShare ? COPY_SHARE : COPY_UNAVAILABLE;
+}
+
+/**
+ * Чем кончилась попытка «Поделиться»: 'done' — ушло, 'silent' — человек
+ * сам закрыл лист (это нормально, экран не трогаем), 'failed' — ошибка,
+ * о ней надо сказать и дать кнопку «сохранить файл».
+ */
+export function shareOutcome(error) {
+  if (!error) return 'done';
+  return error?.name === 'AbortError' ? 'silent' : 'failed';
+}
+
 /**
  * Разбор файла копии. Возвращает { ok: true, data } либо
  * { ok: false, error } с причиной. Ничего не пишет.
@@ -216,4 +244,27 @@ export function importCounts(before, after) {
     else fresh += 1;
   }
   return { fresh, existed };
+}
+
+/**
+ * Подписи заводских контактов: у 112 и линии МЧС в старых версиях они
+ * были другими (в том числе «только если ты в Москве»). Заменяем запись
+ * только тогда, когда телефон и подпись дословно совпадают с прежними,
+ * то есть её не правили руками. Всё своё остаётся как есть.
+ * Возвращает новый массив; вход не меняет.
+ */
+export function refreshDefaultContacts(contacts = [], defaults = [], legacy = []) {
+  const now = new Map(defaults.map((d) => [String(d.phone), d]));
+  const was = new Map(legacy.map((l) => [String(l.phone), l]));
+
+  return contacts.map((contact) => {
+    const before = was.get(String(contact?.phone));
+    const current = now.get(String(contact?.phone));
+    if (!before || !current) return contact;
+
+    const untouched =
+      String(contact.label ?? '') === before.label &&
+      String(contact.note ?? '') === before.note;
+    return untouched ? { ...contact, label: current.label, note: current.note } : contact;
+  });
 }
