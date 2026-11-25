@@ -104,7 +104,7 @@ import {
   COPY_TEXT_BAD,
 } from './store.js';
 import { readData, writeData, clearData } from './db.js';
-import { TAB_OF, transition, goBack, stateOf, historyPlan } from './nav.js';
+import { TAB_OF, transition, goBack, stateOf, historyPlan, isTabRoot } from './nav.js';
 import {
   tagsWithCounts,
   topicEntries,
@@ -312,6 +312,9 @@ let nav = [];
 // состояние, которым надо переписать запись истории после перехода:
 // go(-n) асинхронен, поэтому это делается в popstate, а не сразу в go()
 let syncState = null;
+// экран, на который вернёт идущий сейчас history.go(-n): пока обход не дошёл,
+// current не трогаем — иначе render() покажет новый экран раньше времени
+let pendingTarget = null;
 let activeTab = 'home';
 let stepIdx = 0;
 let cardEdit = false;
@@ -470,7 +473,12 @@ function go(name, id = null) {
   const step = transition(current, nav, { name, id });
 
   if (step.mode === 'none') {
+    // Повторный тап по тому же экрану: чаще всего — по активной вкладке.
+    // Она и должна вернуть наверх: человек листал дневник и тапнул
+    // «дневник», он ждёт начала. Для экранов внутри (двойной тап по
+    // «показать» на «готово») позицию не трогаем — это не вкладка.
     render();
+    if (isTabRoot(name, id)) window.scrollTo(0, 0);
     return;
   }
 
@@ -491,14 +499,23 @@ function go(name, id = null) {
     // go(-n) асинхронен: replaceState, сделанный до перехода, попал бы
     // в покидаемую запись. Поэтому переход состоялся → поправим запись
     // в popstate, когда она уже текущая.
+    //
+    // render() здесь не зовём: экран перерисует popstate, когда браузер
+    // дошёл до записи. Иначе кадр показал бы экран, до которого обход
+    // ещё не добрался, и прокрутка считалась бы дважды.
     syncState = plan.replace ? state : null;
+    pendingTarget = step;
     window.history.go(-plan.back);
+    return;
   } else if (plan.replace) window.history.replaceState(state, '');
 
   current = step.current;
   nav = step.stack;
   notice = '';
   render();
+  // Тап открывает экран сверху. «Назад» сюда не идёт: там позицию
+  // возвращает браузер, и трогать её нельзя.
+  window.scrollTo(0, 0);
 }
 
 /**
@@ -531,6 +548,13 @@ function switchTab(name) {
  * не вмешиваемся: пусть система закрывает приложение.
  */
 window.addEventListener('popstate', () => {
+  // Сюда пришли двумя путями: тап по вкладке из глубины (pendingTarget) или
+  // обычный жест «назад». В первом случае экран надо вернуть наверх, во
+  // втором — оставить позицию, которую восстановил браузер.
+  const fromTap = Boolean(pendingTarget);
+  const next = fromTap ? pendingTarget : goBack(current, nav);
+  pendingTarget = null;
+
   // Переход назад по своим записям уже состоялся. Запись, на которую
   // пришли, могла остаться с экраном покинутой вкладки — приводим её
   // к правде, пока экран совпадает с тем, что на нём показано.
@@ -540,15 +564,21 @@ window.addEventListener('popstate', () => {
     window.history.replaceState(state, '');
   }
 
-  const step = goBack(current, nav);
-  if (!step.moved) return;
+  if (!fromTap && !next.moved) return;
 
-  current = step.current;
-  nav = step.stack;
+  current = next.current;
+  nav = next.stack;
   cardEdit = false;
   contactsEdit = false;
   notice = '';
   render();
+
+  // Safari возвращает прокрутку уже после обработчика popstate, а Chrome —
+  // после первого кадра: сброс в том же кадре браузер перезаписал бы своей
+  // позицией. Поэтому два кадра. На iOS это не проверено, обход заранее.
+  if (fromTap) {
+    requestAnimationFrame(() => requestAnimationFrame(() => window.scrollTo(0, 0)));
+  }
 });
 
 /* ------------------------------------------------------------------ */
@@ -570,7 +600,6 @@ function render() {
   view.innerHTML = `<div id="alerts">${alertsBlock()}</div>${
     SCREENS[current.name]?.(current.id) ?? SCREENS.home()
   }`;
-  view.scrollTop = 0;
 
   for (const b of tabbar.querySelectorAll('[data-tab]')) {
     b.classList.toggle('is-active', b.dataset.tab === activeTab);
