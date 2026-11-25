@@ -76,6 +76,7 @@ import {
   EXPORT_SHARE_FAILED,
   EXPORT_SHARE_UNAVAILABLE,
   EXPORT_SHARE_CANT,
+  EXPORT_SHARE_REFUSED,
   EXPORT_COPY_BUTTON,
   EXPORT_COPY_DONE,
   EXPORT_COPY_FAILED,
@@ -124,6 +125,7 @@ import {
   importCounts,
   exportName,
   shareOutcome,
+  shellOf,
   refreshDefaultContacts,
   readStored,
   quarantineKey,
@@ -1794,11 +1796,19 @@ function buildCopy() {
 /**
  * Файл копии: имя латиницей и дата, без русских слов — файл может уехать
  * в чужой чат, и имя должно открываться на любом устройстве.
+ * Типы перечислены один раз: и проба в диагностике, и повтор при TypeError
+ * берут их отсюда, а не из второго списка.
  */
+const COPY_TYPES = ['application/json', 'text/plain', 'application/octet-stream'];
+
+function copyFile(text, type = COPY_TYPES[0]) {
+  const name = exportName(new Date()).replace(/\.json$/, type === 'text/plain' ? '.txt' : '.json');
+  return new File([text], name, { type });
+}
+
 function makeCopyFile(text) {
-  const name = exportName(new Date());
-  const file = new File([text], name, { type: 'application/json' });
-  return { name, file };
+  const file = copyFile(text);
+  return { name: file.name, file };
 }
 
 /**
@@ -1852,15 +1862,7 @@ function toggleDebug() {
 /** Файлы трёх типов: видно, что именно отвергает браузер телефона. */
 function probeFiles() {
   const payload = JSON.stringify(buildExport(data, SITE_VERSION), null, 2);
-  const name = exportName(new Date());
-  return [
-    ['application/json', new File([payload], name, { type: 'application/json' })],
-    ['text/plain', new File([payload], name.replace(/\.json$/, '.txt'), { type: 'text/plain' })],
-    [
-      'application/octet-stream',
-      new File([payload], name, { type: 'application/octet-stream' }),
-    ],
-  ];
+  return COPY_TYPES.map((type) => [type, copyFile(payload, type)]);
 }
 
 function canShareProbe(file) {
@@ -1875,11 +1877,15 @@ function canShareProbe(file) {
 /**
  * Строка диагностики — построчно, без догадок: что есть в браузере,
  * что он отвечает про каждый тип файла и чем кончилась последняя попытка.
+ * «Оболочка» стоит здесь потому, что встроенное окно мессенджера отвечает
+ * на всё «Permission denied», и по этой строке видно, где мы находимся,
+ * без вычислений из кода ошибки.
  */
 function debugBlock() {
   if (!debugEnabled()) return '';
   const probes = probeFiles();
   const lines = [
+    `оболочка: ${shellOf(navigator.userAgent, isStandalone)}`,
     `share: ${typeof navigator.share}`,
     `canShare: ${typeof navigator.canShare}`,
     ...probes.map(([type, file]) => `canShare(${type}): ${canShareProbe(file)}`),
@@ -1900,13 +1906,29 @@ function debugBlock() {
  */
 
 /**
+ * Текст отказа по разрешению. Выход называем прямо: в WebView мессенджера
+ * файл не уйдёт никогда, а текст копии уходит откуда угодно. Обещания про
+ * иконку на главном экране здесь нет: оно не измерено ни на Android, ни на
+ * iOS, а на iOS в standalone файл в лист не отдаётся вовсе.
+ */
+function shareRefusedNotice() {
+  return EXPORT_SHARE_REFUSED;
+}
+
+/**
  * «Отправить»: системный лист с файлом копии (там будет Telegram и всё
  * остальное). Ветку решает canShare({files}), а не наличие share:
  * «браузер не умеет» — не сбой, и текст у него другой.
+ *
+ * После падения исходы разные (store.js, shareOutcome):
+ *   refused — повтор бессмысленен, тип файла ни при чём: говорим выход;
+ *   retry   — старый движок не знает json: одна попытка с text/plain;
+ *   silent  — лист закрыли сами: экран не трогаем;
+ *   failed  — остальное: честный «не получилось» и два фолбэка.
  */
 async function sendCopy() {
   const text = buildCopy();
-  const { file } = makeCopyFile(text);
+  const json = copyFile(text, COPY_TYPES[0]);
   shareError = '';
   shareMessage = '';
 
@@ -1916,7 +1938,7 @@ async function sendCopy() {
     render();
     return;
   }
-  if (canShareFiles(file) === false) {
+  if (canShareFiles(json) === false) {
     shareError = 'canShare({files}) === false';
     notice = EXPORT_SHARE_CANT;
     render();
@@ -1924,15 +1946,31 @@ async function sendCopy() {
   }
 
   try {
-    await navigator.share({ files: [file] });
+    await navigator.share({ files: [json] });
   } catch (e) {
-    // человек сам закрыл лист — это нормально, экран не трогаем
-    if (shareOutcome(e) === 'silent') return;
+    const outcome = shareOutcome(e);
+    if (outcome === 'silent') return;
     shareError = e?.name || 'без имени';
     shareMessage = e?.message || '';
-    notice = EXPORT_SHARE_FAILED;
-    render();
-    return;
+    if (outcome !== 'retry') {
+      notice = outcome === 'refused' ? shareRefusedNotice() : EXPORT_SHARE_FAILED;
+      render();
+      return;
+    }
+    // Один повтор с text/plain: то же содержимое, имя .txt. Дальше не идём —
+    // третий раз падало бы так же.
+    try {
+      await navigator.share({ files: [copyFile(text, 'text/plain')] });
+    } catch (e2) {
+      if (shareOutcome(e2) === 'silent') return;
+      shareError = e2?.name || 'без имени';
+      shareMessage = e2?.message || '';
+      // Второй отказ по типу — это по-прежнему «окно не даёт»; но если
+      // движок упал по другой причине, честнее общий текст, а не диагноз.
+      notice = shareOutcome(e2) === 'failed' ? EXPORT_SHARE_FAILED : shareRefusedNotice();
+      render();
+      return;
+    }
   }
   notice = EXPORT_SHARE_DONE;
   render();

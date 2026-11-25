@@ -512,13 +512,38 @@ export function copyKind(text) {
 }
 
 /**
- * Чем кончилась попытка «Поделиться»: 'done' — ушло, 'silent' — человек
- * сам закрыл лист (это нормально, экран не трогаем), 'failed' — ошибка,
- * о ней надо сказать и дать фолбэки («Скопировать текст копии», «скачать файл»).
+ * Чем кончилась попытка «Поделиться». Пять исходов: четыре отказа требуют
+ * разных слов, а не одного «не получилось».
+ *   'done'    — ушло;
+ *   'silent'  — человек сам закрыл лист (это нормально, экран не трогаем);
+ *   'refused' — окно не дало отправить (NotAllowedError/SecurityError).
+ *               От типа файла это не зависит: повтор упадёт так же;
+ *   'retry'   — движок не знает тип или файлы (TypeError/NotSupportedError).
+ *               Здесь один повтор с text/plain имеет смысл;
+ *   'failed'  — остальное: о нём говорим, но обещать выход не берёмся.
  */
 export function shareOutcome(error) {
   if (!error) return 'done';
-  return error?.name === 'AbortError' ? 'silent' : 'failed';
+  const name = error?.name;
+  if (name === 'AbortError') return 'silent';
+  if (name === 'NotAllowedError' || name === 'SecurityError') return 'refused';
+  if (name === 'TypeError' || name === 'NotSupportedError') return 'retry';
+  return 'failed';
+}
+
+/**
+ * В каком окне открыто приложение. `Telegram` в userAgent — встроенное окно
+ * мессенджера, `; wv` — Android WebView. Там системный лист «Поделиться»
+ * файл не отдаёт (проверено на телефоне 25.11.2026: NotAllowedError при
+ * canShare === true), и знать это надо по имени оболочки, а не вычислять
+ * из кода ошибки.
+ */
+export function shellOf(ua = '', standalone = false) {
+  const s = String(ua);
+  if (/Telegram/i.test(s)) return 'telegram';
+  if (/;\s*wv[;)]/i.test(s)) return 'webview';
+  if (standalone) return 'standalone';
+  return 'browser';
 }
 
 /**
