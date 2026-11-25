@@ -19,14 +19,26 @@ import {
   HELP_QUESTION,
   HELP_ANSWERS,
   WEAK_LABEL,
+  TOPICS_BUTTON,
+  TOPICS_TITLE,
+  TOPICS_LEAD,
+  TOPIC_EMPTY,
+  TOPIC_COUNT,
+  HELPED_FEW,
+  HELPED_MANY,
+  HELPED_LIST,
+  LAST_HELPED,
+  DRAFT_HELPED,
+  DRAFT_HELPED_REMOVE,
+  FILTER_ALL,
+  FILTER_HINT,
+  SHOWN_OF,
   CALM_BUTTON,
   CALM_LINE,
   CALM_EXIT,
   CALM_MINUTES,
-  EXPORT_SHARE_BUTTON,
+  EXPORT_SEND_BUTTON,
   EXPORT_DOWNLOAD_BUTTON,
-  EXPORT_NOTE_SHARE,
-  EXPORT_NOTE,
   EXPORT_SHARE_DONE,
   EXPORT_SHARE_FAILED,
   EXPORT_SHARE_UNAVAILABLE,
@@ -34,8 +46,13 @@ import {
   EXPORT_COPY_BUTTON,
   EXPORT_COPY_DONE,
   EXPORT_COPY_FAILED,
-  EXPORT_FALLBACK_BUTTON,
-  EXPORT_FALLBACK_NOTE,
+  COPY_NOTE,
+  PASTE_BUTTON,
+  PASTE_HINT,
+  PASTE_PARSE_BUTTON,
+  PASTE_EMPTY,
+  PASTE_CLIPBOARD_EMPTY,
+  PASTE_BAD,
   EXPORT_DONE,
   EXPORT_FAILED,
   EXPORT_DEBUG,
@@ -47,6 +64,13 @@ import {
   IMPORT_ERR_APP,
   IMPORT_ERR_VERSION,
   IMPORT_ERR_DATA,
+  IMPORT_ERR_NEWER,
+  SAVE_FAILED_TITLE,
+  SAVE_FAILED_TEXT,
+  CORRUPT_TITLE,
+  CORRUPT_TEXT,
+  CORRUPT_LOCKED_TEXT,
+  ABOUT_SCHEMA_NOTE,
   EMPTY_TITLE,
   EMPTY_TEXT,
   EMPTY_IMPORT,
@@ -59,21 +83,38 @@ import {
 import { rankSkills, bump } from './rank.js';
 import {
   normalize,
+  migrate,
   mergeData,
   isDataEmpty,
   buildExport,
   parseImport,
   importCounts,
   exportName,
-  copyTarget,
   shareOutcome,
   refreshDefaultContacts,
-  COPY_SHARE,
-  COPY_NO_SHARE,
-  COPY_CANT_SHARE,
+  readStored,
+  quarantineKey,
+  saveOutcome,
+  copyKind,
+  SCHEMA_VERSION,
+  STORAGE_BAD,
+  STORAGE_EMPTY,
+  SAVE_FAILED,
+  COPY_TEXT_EMPTY,
+  COPY_TEXT_BAD,
 } from './store.js';
 import { readData, writeData, clearData } from './db.js';
 import { TAB_OF, transition, goBack, stateOf } from './nav.js';
+import {
+  tagsWithCounts,
+  topicEntries,
+  listEntries,
+  pageOf,
+  topicStats,
+  lastHelped,
+  timesWord,
+  LIST_LIMIT,
+} from './topics.js';
 
 /* ------------------------------------------------------------------ */
 /*  Состояние                                                          */
@@ -84,6 +125,9 @@ const SITE_VERSION =
   document.querySelector('meta[name="site-version"]')?.content || '?';
 
 const KEY = 'opora.v1';
+// ВНИМАНИЕ: v1 здесь — имя хранилища, а не номер схемы данных.
+// Схема живёт в data.schema и в конверте копии (см. docs/schema.md).
+// Ключ не переименовывать: иначе телефон увидит пустоту и потеряет записи.
 // отметка «приложением уже пользовались»: нужна, чтобы отличить
 // «данные вычищены» от «первый запуск»
 const SEEN = 'opora.seen';
@@ -93,8 +137,42 @@ const DEBUG = 'opora.debug';
 
 const defaults = () => ({
   ...normalize(null),
+  schema: SCHEMA_VERSION,
   contacts: DEFAULT_CONTACTS.map((c) => ({ ...c })),
 });
+
+// сохранение не удалось ни в одно хранилище: человек должен это увидеть
+let saveFail = false;
+// повреждённая строка из localStorage: сырьё и ключ карантина
+// (пустой ключ значит «отложить не удалось»)
+let corrupt = null;
+// карантин не снялся — поверх повреждённых данных не пишем вовсе
+let keyLocked = false;
+
+/** Снять копию сырья до того, как что-то поверх запишется. */
+function quarantine(raw) {
+  const key = quarantineKey();
+  try {
+    localStorage.setItem(key, raw);
+    return key;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Единственное место, где пишется KEY. Возвращает true/false, чтобы save()
+ * мог честно сказать, записалось ли хоть куда-нибудь.
+ */
+function writeLocal(value) {
+  if (keyLocked) return false;
+  try {
+    localStorage.setItem(KEY, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // была ли своя копия в localStorage: если нет — при равном времени
 // главной считается копия из IndexedDB, иначе стандартные контакты
@@ -109,13 +187,21 @@ const hadLocal = (() => {
 
 function load() {
   try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return defaults();
+    const stored = readStored(localStorage.getItem(KEY));
+    if (stored.kind === STORAGE_EMPTY) return defaults();
 
-    const saved = JSON.parse(raw);
-    const data = normalize(saved);
+    if (stored.kind === STORAGE_BAD) {
+      // Битый JSON — не «пусто». Сначала копия сырья, иначе первое же
+      // сохранение затрёт то, что ещё можно разобрать.
+      const key = quarantine(stored.raw);
+      corrupt = { raw: stored.raw, key };
+      keyLocked = !key;
+      return defaults();
+    }
+
+    const data = migrate(stored.value).data;
     // совсем старые записи без списка контактов — стандартный список
-    if (!Array.isArray(saved?.contacts)) {
+    if (!Array.isArray(stored.value?.contacts)) {
       data.contacts = DEFAULT_CONTACTS.map((c) => ({ ...c }));
     }
     return data;
@@ -142,11 +228,7 @@ function migrateContacts() {
 function migrateContactsAndSave() {
   if (!migrateContacts()) return false;
   data.ts = Date.now();
-  try {
-    localStorage.setItem(KEY, JSON.stringify(data));
-  } catch {
-    /* приватный режим — вторая копия ниже всё равно попробует */
-  }
+  writeLocal(data);
   writeData(data);
   return true;
 }
@@ -174,16 +256,24 @@ async function askPersist() {
   }
 }
 
+/**
+ * Сохранение с честным результатом. Оба хранилища могут отказать
+ * (приватный режим, переполнение, запрет) — тогда на экране появляется
+ * строка «не записалось» и кнопка выгрузки, а не тишина.
+ */
 function save() {
   data.ts = Date.now();
-  try {
-    localStorage.setItem(KEY, JSON.stringify(data));
-  } catch {
-    /* приватный режим или переполнение — вторая копия ниже всё равно попробует */
-  }
+  const local = writeLocal(data);
   markUsed();
   askPersist();
-  writeData(data);
+  writeData(data).then((db) => {
+    const failed = saveOutcome({ local, db }) === SAVE_FAILED;
+    if (failed === saveFail) return;
+    saveFail = failed;
+    // только верхняя строка, не весь экран: save() зовут и на ввод в поле,
+    // а полная перерисовка стёрла бы набранное и каретку
+    renderAlerts();
+  });
 }
 
 /**
@@ -202,9 +292,7 @@ async function hydrate() {
 
   // localStorage пуст — значит своя копия «свежая» только по названию:
   // главной считаем вторую, чтобы не потерять отредактированные контакты
-  const merged = hadLocal
-    ? mergeData(data, normalize(second))
-    : mergeData(normalize(second), data);
+  const merged = hadLocal ? mergeData(data, second) : mergeData(second, data);
   if (JSON.stringify(merged) === JSON.stringify(data)) {
     // копии совпали, но старая подпись заводских контактов могла остаться
     if (migrateContactsAndSave()) render();
@@ -212,11 +300,7 @@ async function hydrate() {
   }
 
   data = merged;
-  try {
-    localStorage.setItem(KEY, JSON.stringify(data));
-  } catch {
-    /* ничего страшного: в IndexedDB уже лежит */
-  }
+  writeLocal(data);
   writeData(data);
   migrateContactsAndSave();
   render();
@@ -229,7 +313,13 @@ let activeTab = 'home';
 let stepIdx = 0;
 let cardEdit = false;
 let contactsEdit = false;
-let draft = { mood: null, tags: new Set(), note: '' };
+let draft = { mood: null, tags: new Set(), note: '', helped: [], helpedAt: {} };
+// какие записи показать в списке: null — все, иначе метка. В данные не пишется.
+let listFilter = null;
+// «помогло» прицепляется к записи, только если ответ свежий: запись
+// на следующее утро — это не «тогда помогло», а вчерашний вечер.
+const HELP_LINK_MS = 30 * 60 * 1000;
+const SKILL_ORDER = Object.keys(SKILLS);
 let tick = null;
 let wakeLock = null;
 let deferredPrompt = null;
@@ -239,8 +329,9 @@ let skillCtx = null;
 let notice = '';
 // защищено ли хранилище от очистки: null — ещё не узнали
 let persisted = null;
-// «Поделиться» не сработало: нужны фолбэки — текст копии и скачивание
-let needFallback = false;
+// восстановление текстом: поле вставки и текст в нём
+let pasteOpen = false;
+let pasteText = '';
 // имя и текст ошибки share: их видно в строке диагностики
 let shareError = '';
 let shareMessage = '';
@@ -271,6 +362,54 @@ const fmtDate = (t) =>
     hour: '2-digit',
     minute: '2-digit',
   });
+
+/** Подстановка в шаблон из content.js: {name}, {n}, {m}, {names}. */
+const fill = (tpl, vars) =>
+  String(tpl).replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+
+/** Названия известных навыков через запятую; незнакомые id пропускаем. */
+const namesOf = (ids) =>
+  (Array.isArray(ids) ? ids : [])
+    .filter((id) => SKILLS[id])
+    .map((id) => SKILLS[id].title)
+    .join(', ');
+
+/**
+ * Навыки черновика, которые ещё попадут в запись: известные и не старше
+ * 30 минут. Время живёт только здесь — в хранилище и в копию не пишется.
+ */
+function draftHelped(now = Date.now()) {
+  return draft.helped.filter((id) => {
+    const ts = Number(draft.helpedAt[id]) || 0;
+    return Boolean(SKILLS[id]) && ts > 0 && now - ts <= HELP_LINK_MS;
+  });
+}
+
+/** Одна запись дневника: дата, слово настроения, метки, заметка. */
+const entryBlock = (e) => `
+  <div class="entry">
+    <div class="entry__top">
+      <span class="entry__date">${fmtDate(e.t)}</span>
+      <span class="entry__mood">${esc(MOOD_WORDS[e.mood - 1] || '')}</span>
+    </div>
+    ${e.tags?.length ? `<div class="entry__tags">${esc(e.tags.join(' · '))}</div>` : ''}
+    ${e.note ? `<div class="entry__note">${esc(e.note)}</div>` : ''}
+  </div>`;
+
+/**
+ * Строка «в прошлый раз помогало» для развилки. Показывается только когда
+ * выбрана ровно одна метка и настроение 1 или 2; нет данных — строки нет.
+ */
+function lastHelpedLine() {
+  if (draft.tags.size !== 1) return '';
+  if (draft.mood !== 1 && draft.mood !== 2) return '';
+  const tag = [...draft.tags][0];
+  const ids = lastHelped(data.entries, tag, SKILL_ORDER, 2);
+  if (!ids.length) return '';
+  return `<div class="helped helped--past">${esc(
+    fill(LAST_HELPED, { names: namesOf(ids) }),
+  )}</div>`;
+}
 
 const isStandalone =
   matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
@@ -366,6 +505,9 @@ function switchTab(name) {
   contactsEdit = false;
   skillCtx = null;
   stepIdx = 0;
+  // фильтр списка — про просмотр, а не про данные: на другой вкладке он
+  // сбрасывается, чтобы старый фильтр не прятал записи молча
+  if (name !== 'diary') listFilter = null;
   go(name);
 }
 
@@ -402,8 +544,9 @@ function render() {
     (current.name === 'breath' && Boolean(current.id)) || current.name === 'calm',
   );
 
-  const html = SCREENS[current.name]?.(current.id) ?? SCREENS.home();
-  view.innerHTML = html;
+  view.innerHTML = `<div id="alerts">${alertsBlock()}</div>${
+    SCREENS[current.name]?.(current.id) ?? SCREENS.home()
+  }`;
   view.scrollTop = 0;
 
   for (const b of tabbar.querySelectorAll('[data-tab]')) {
@@ -803,7 +946,9 @@ const SCREENS = {
   /* ------------------------------ дневник ------------------------- */
 
   diary() {
-    const entries = [...data.entries].sort((a, b) => b.t - a.t);
+    const tagsPresent = tagsWithCounts(data.entries, MOOD_TAGS);
+    const page = pageOf(listEntries(data.entries, listFilter), LIST_LIMIT);
+    const helpedNames = draftHelped();
     const last = [...data.entries].sort((a, b) => a.t - b.t).slice(-14);
 
     return `
@@ -833,6 +978,26 @@ const SCREENS = {
           ).join('')}
         </div>
 
+        ${lastHelpedLine()}
+
+        ${
+          helpedNames.length
+            ? `<div class="helped helped--draft">
+                 <span>${esc(DRAFT_HELPED)}:</span>
+                 ${helpedNames
+                   .map(
+                     (id) =>
+                       `<button class="chip" data-act="draft-unhelp" data-id="${esc(
+                         id,
+                       )}" aria-label="${esc(`${DRAFT_HELPED_REMOVE}: ${SKILLS[id].title}`)}">
+                          ${esc(SKILLS[id].title)} ×
+                        </button>`,
+                   )
+                   .join('')}
+               </div>`
+            : ''
+        }
+
         <textarea id="note" rows="3" placeholder="Что-то ещё? Пара слов достаточно.">${esc(
           draft.note,
         )}</textarea>
@@ -853,22 +1018,114 @@ const SCREENS = {
         }
 
         ${
-          entries.length
-            ? entries
-                .slice(0, 40)
+          data.entries.length
+            ? `<button class="btn btn--ghost" data-act="go" data-screen="topics">
+                 ${esc(TOPICS_BUTTON)}
+               </button>`
+            : ''
+        }
+
+        ${
+          tagsPresent.length
+            ? `<div class="chips" role="group" aria-label="${esc(FILTER_HINT)}">
+                 <button class="chip ${listFilter ? '' : 'on'}" data-act="filter" data-tag="">
+                   ${esc(FILTER_ALL)}
+                 </button>
+                 ${tagsPresent
+                   .map(
+                     ({ tag }) => `
+                   <button class="chip ${listFilter === tag ? 'on' : ''}" data-act="filter" data-tag="${esc(
+                     tag,
+                   )}">
+                     ${esc(tag)}
+                   </button>`,
+                   )
+                   .join('')}
+               </div>`
+            : ''
+        }
+
+        ${
+          page.shown.length
+            ? page.shown.map(entryBlock).join('') +
+              (page.total > page.shown.length
+                ? `<div class="shown">${esc(
+                    fill(SHOWN_OF, { n: page.shown.length, m: page.total }),
+                  )}</div>`
+                : '')
+            : data.entries.length
+              ? `<div class="empty">${esc(TOPIC_EMPTY)}</div>`
+              : `<div class="empty">Записей пока нет. Это нормально.</div>`
+        }
+      </div>`;
+  },
+
+  /* ------------------------------ темы --------------------------- */
+
+  topics() {
+    const list = tagsWithCounts(data.entries, MOOD_TAGS);
+
+    return `
+      <div class="screen">
+        <button class="back" data-act="back">‹ назад</button>
+        <header class="head">
+          <div class="eyebrow">дневник</div>
+          <h1>${esc(TOPICS_TITLE)}</h1>
+          <p class="lead">${esc(TOPICS_LEAD)}</p>
+        </header>
+        ${
+          list.length
+            ? list
                 .map(
-                  (e) => `
-              <div class="entry">
-                <div class="entry__top">
-                  <span class="entry__date">${fmtDate(e.t)}</span>
-                  <span class="entry__mood">${esc(MOOD_WORDS[e.mood - 1] || '')}</span>
-                </div>
-                ${e.tags?.length ? `<div class="entry__tags">${esc(e.tags.join(' · '))}</div>` : ''}
-                ${e.note ? `<div class="entry__note">${esc(e.note)}</div>` : ''}
-              </div>`,
+                  ({ tag, n }) => `
+              <button class="card" data-act="go" data-screen="topic" data-id="${esc(tag)}">
+                <div class="card__title">${esc(tag)}</div>
+                <div class="card__meta">${esc(fill(TOPIC_COUNT, { n }))}</div>
+              </button>`,
                 )
                 .join('')
-            : `<div class="empty">Записей пока нет. Это нормально.</div>`
+            : `<div class="empty">${esc(TOPIC_EMPTY)}</div>`
+        }
+      </div>`;
+  },
+
+  topic(tag) {
+    if (!tag || !MOOD_TAGS.includes(tag)) return SCREENS.topics();
+
+    const items = topicEntries(data.entries, tag);
+    const stats = topicStats(data.entries, tag, SKILL_ORDER);
+    // не больше трёх строк: при M ≥ 2 это ещё не стена текста
+    const top = stats.helped.slice(0, 3);
+
+    const helpedBlock =
+      stats.total >= 2
+        ? top
+            .map(({ id, n }) => {
+              const word = timesWord(n);
+              const tpl = word === 'раза' ? HELPED_FEW : HELPED_MANY;
+              return `<div class="helped">${esc(
+                fill(tpl, { name: SKILLS[id].title, n, m: stats.total }),
+              )}</div>`;
+            })
+            .join('')
+        : top.length
+          ? `<div class="helped">${esc(
+              fill(HELPED_LIST, { names: namesOf(top.map((x) => x.id)) }),
+            )}</div>`
+          : '';
+
+    return `
+      <div class="screen">
+        <button class="back" data-act="back">‹ назад</button>
+        <header class="head">
+          <div class="eyebrow">${esc(TOPICS_TITLE)}</div>
+          <h1>${esc(tag)}</h1>
+        </header>
+        ${helpedBlock}
+        ${
+          items.length
+            ? items.map(entryBlock).join('')
+            : `<div class="empty">${esc(TOPIC_EMPTY)}</div>`
         }
       </div>`;
   },
@@ -880,16 +1137,30 @@ const SCREENS = {
       <div class="screen">
         <button class="back" data-act="back">‹ назад</button>
         <header class="head"><h1>Ещё</h1></header>
+        ${statusBlock()}
         <div class="grid">
           <button class="grid__btn" data-act="go" data-screen="contacts">Контакты и звонки</button>
           <button class="grid__btn" data-act="go" data-screen="about">О приложении</button>
           <button class="grid__btn" data-act="install">Установить на телефон</button>
-          <button class="grid__btn" data-act="export">${esc(copyLabel())}</button>
-          <button class="grid__btn" data-act="import">${esc(IMPORT_BUTTON)}</button>
         </div>
-        <p class="hint">${esc(copyNote())}</p>
-        ${statusBlock()}
-        ${fallbackBlock()}
+
+        <section class="copy">
+          <h2 class="copy__title">Копия</h2>
+          <button class="btn btn--primary" data-act="export-send">${esc(EXPORT_SEND_BUTTON)}</button>
+          <button class="btn" data-act="export-download">${esc(EXPORT_DOWNLOAD_BUTTON)}</button>
+          <button class="btn btn--ghost btn--small" data-act="export-copy-text">
+            ${esc(EXPORT_COPY_BUTTON)}
+          </button>
+          <p class="hint">${esc(COPY_NOTE)}</p>
+        </section>
+
+        <section class="copy">
+          <h2 class="copy__title">Восстановление</h2>
+          <button class="btn" data-act="import">${esc(IMPORT_BUTTON)}</button>
+          <button class="btn btn--ghost" data-act="paste">${esc(PASTE_BUTTON)}</button>
+          ${pasteBlock()}
+        </section>
+
         ${debugBlock()}
         <div class="persist">
           <div class="persist__row">
@@ -928,6 +1199,7 @@ const SCREENS = {
           на компьютере — скачивает. Если файл не уходит, текст копии можно
           скопировать и вставить в переписку.
         </p>
+        <p class="muted small">${esc(ABOUT_SCHEMA_NOTE)}</p>
         <div class="note">
           ${esc(SAFETY_NOTE)}
           Если есть угроза для жизни — это не к приложению, это в скорую.
@@ -1004,6 +1276,80 @@ function statusBlock() {
 }
 
 /**
+ * Строка статуса внутри баннера. Баннер стоит на каждом экране, а на «Ещё»
+ * тот же текст уже выведен в самом экране — второй раз он не нужен.
+ */
+function noticeInAlert() {
+  if (current.name === 'more') return '';
+  return statusBlock();
+}
+
+/**
+ * То, что человек обязан увидеть на любом экране: сохранение не удалось
+ * и повреждённое хранилище. Оба случая — про потерю записей, поэтому
+ * строка стоит над экраном, а не в «Ещё».
+ */
+function alertsBlock() {
+  const out = [];
+
+  if (corrupt) {
+    out.push(`
+      <div class="alert" role="alert">
+        <div class="alert__title">${esc(CORRUPT_TITLE)}</div>
+        <p class="alert__text">${esc(corrupt.key ? CORRUPT_TEXT : CORRUPT_LOCKED_TEXT)}</p>
+        <button class="btn btn--small" data-act="export-copy-raw">
+          ${esc(EXPORT_COPY_BUTTON)}
+        </button>
+        ${noticeInAlert()}
+      </div>`);
+  }
+
+  if (saveFail) {
+    out.push(`
+      <div class="alert" role="alert">
+        <div class="alert__title">${esc(SAVE_FAILED_TITLE)}</div>
+        <p class="alert__text">${esc(SAVE_FAILED_TEXT)}</p>
+        <button class="btn btn--small" data-act="export-copy-text">
+          ${esc(EXPORT_COPY_BUTTON)}
+        </button>
+        ${noticeInAlert()}
+      </div>`);
+  }
+
+  return out.join('');
+}
+
+/**
+ * Обновить только строку предупреждений, не перерисовывая экран.
+ * Нужна там, где рендер разрушил бы ввод (сохранение на каждую букву).
+ */
+function renderAlerts() {
+  const host = view.querySelector('#alerts');
+  if (!host) return;
+  host.innerHTML = alertsBlock();
+}
+
+/** Поле вставки: открывается, если буфер недоступен или пуст. */
+function pasteBlock() {
+  if (!pasteOpen) return '';
+  return `
+    <p class="hint">${esc(PASTE_HINT)}</p>
+    <textarea id="paste-text" rows="4" spellcheck="false">${esc(pasteText)}</textarea>
+    <button class="btn btn--small" data-act="paste-parse">${esc(PASTE_PARSE_BUTTON)}</button>`;
+}
+
+/** Выгрузка сырья повреждённого хранилища — то, что удалось прочитать. */
+async function copyCorruptText() {
+  try {
+    const ok = await copyText(corrupt?.raw || '');
+    notice = ok ? EXPORT_COPY_DONE : EXPORT_COPY_FAILED;
+  } catch {
+    notice = EXPORT_COPY_FAILED;
+  }
+  render();
+}
+
+/**
  * Data может пропасть целиком: localStorage вычистили, а IndexedDB
  * не пережила. Если приложением раньше пользовались — говорим прямо
  * и даём кнопку импорта, а не делаем вид, что всё в порядке.
@@ -1039,6 +1385,10 @@ async function refreshPersist() {
   if (el) el.textContent = value ? PERSIST_YES : PERSIST_NO;
 }
 
+/**
+ * Восстановление из файла. Формат определяется по содержимому, а не по
+ * расширению: тот же файл мог прийти из мессенджера под любым именем.
+ */
 async function applyImport(file) {
   let text = '';
   try {
@@ -1048,7 +1398,33 @@ async function applyImport(file) {
     render();
     return;
   }
+  await importText(text);
+}
 
+/**
+ * Общий вход восстановления: одна строка, что бы ни пришло — файл,
+ * буфер обмена или вставка руками. Формат решает содержимое.
+ */
+async function importText(raw) {
+  const text = String(raw ?? '').trim();
+  const kind = copyKind(text);
+
+  if (kind === COPY_TEXT_EMPTY) {
+    notice = PASTE_EMPTY;
+    render();
+    return;
+  }
+  if (kind === COPY_TEXT_BAD) {
+    notice = PASTE_BAD;
+    render();
+    return;
+  }
+
+  applyPlainImport(text);
+}
+
+/** Импорт копии. Данные на устройстве не трогаются при отказе. */
+function applyPlainImport(text) {
   const parsed = parseImport(text);
   if (!parsed.ok) {
     notice =
@@ -1057,8 +1433,9 @@ async function applyImport(file) {
         app: IMPORT_ERR_APP,
         version: IMPORT_ERR_VERSION,
         data: IMPORT_ERR_DATA,
+        // копия из будущего: сливать нельзя — незнакомые поля потеряются
+        newer: IMPORT_ERR_NEWER,
       }[parsed.error] || IMPORT_ERR_JSON;
-    // данные не тронуты: сохранять нечего
     render();
     return;
   }
@@ -1067,66 +1444,65 @@ async function applyImport(file) {
   const { fresh, existed } = importCounts(data, merged);
   data = merged;
   save();
-  // старый файл мог принести прежние подписи 112 и линии МЧС
+  // старая копия могла принести прежние подписи 112 и линии МЧС
   migrateContactsAndSave();
+  pasteOpen = false;
+  pasteText = '';
   notice = IMPORT_RESULT.replace('{n}', String(fresh)).replace('{m}', String(existed));
   render();
 }
 
-/**
- * Копия файла. Ветка выбирается по устройству, а не по факту успеха:
- * телефон — сразу «Поделиться» (цель — переслать, а не сохранить),
- * десктоп — скачивание. Имя — слаг и дата, без русских слов: файл
- * может уехать в чужой чат.
- */
-function makeCopyFile() {
-  const payload = buildExport(data, SITE_VERSION);
-  const name = exportName(new Date());
-  const file = new File([JSON.stringify(payload, null, 2)], name, {
-    type: 'application/json',
-  });
-  return { name, file };
+/** «Вставить текст»: сначала буфер, а если не дал — поле для вставки руками. */
+async function pasteFromClipboard() {
+  let text = '';
+  try {
+    if (navigator.clipboard?.readText) text = await navigator.clipboard.readText();
+  } catch {
+    text = '';
+  }
+
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) {
+    pasteOpen = true;
+    notice = PASTE_CLIPBOARD_EMPTY;
+    render();
+    document.getElementById('paste-text')?.focus();
+    return;
+  }
+
+  await importText(trimmed);
 }
 
-function isTouchDevice() {
-  try {
-    if (navigator.maxTouchPoints > 0) return true;
-    return matchMedia('(pointer: coarse)').matches;
-  } catch {
-    return false;
-  }
+/**
+ * Текст копии. Один и тот же для всех трёх путей наружу: файл, лист
+ * «Поделиться» и буфер. Копия не зашифрована — так и подписана на экране.
+ */
+function buildCopy() {
+  return JSON.stringify(buildExport(data, SITE_VERSION));
+}
+
+/**
+ * Файл копии: имя латиницей и дата, без русских слов — файл может уехать
+ * в чужой чат, и имя должно открываться на любом устройстве.
+ */
+function makeCopyFile(text) {
+  const name = exportName(new Date());
+  const file = new File([text], name, { type: 'application/json' });
+  return { name, file };
 }
 
 /**
  * canShare({ files }) для настоящего файла копии: true / false,
  * либо null — метода нет или он упал на проверке.
  */
-function canShareFiles(file = makeCopyFile().file) {
+function canShareFiles(file) {
+  if (!file) return null;
   try {
     if (typeof navigator.canShare !== 'function') return null;
     return navigator.canShare({ files: [file] }) === true;
   } catch {
     return null;
   }
-}
-
-function currentCopyTarget() {
-  return copyTarget({
-    touch: isTouchDevice(),
-    hasShare: typeof navigator.share === 'function',
-    canShare: canShareFiles(),
-  });
-}
-
-// Подпись — по устройству: на телефоне кнопка зовёт переслать, даже если
-// браузер этого не умеет. Тогда нажатие честно объяснит и даст фолбэки,
-// а не пообещает «сохранить» и не сохранит.
-function copyLabel() {
-  return isTouchDevice() ? EXPORT_SHARE_BUTTON : EXPORT_DOWNLOAD_BUTTON;
-}
-
-function copyNote() {
-  return isTouchDevice() ? EXPORT_NOTE_SHARE : EXPORT_NOTE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1192,12 +1568,12 @@ function canShareProbe(file) {
  */
 function debugBlock() {
   if (!debugEnabled()) return '';
+  const probes = probeFiles();
   const lines = [
     `share: ${typeof navigator.share}`,
     `canShare: ${typeof navigator.canShare}`,
-    ...probeFiles().map(([type, file]) => `canShare(${type}): ${canShareProbe(file)}`),
+    ...probes.map(([type, file]) => `canShare(${type}): ${canShareProbe(file)}`),
     `maxTouchPoints: ${navigator.maxTouchPoints ?? '?'}`,
-    `ветка: ${currentCopyTarget()}`,
     `ошибка: ${shareError || '—'}`,
   ];
   if (shareMessage) lines.push(`сообщение: ${shareMessage}`);
@@ -1208,23 +1584,35 @@ function debugBlock() {
     </div>`;
 }
 
-/** Фолбэки после неудачи: сначала то, что работает всегда, потом файл. */
-function fallbackBlock() {
-  if (!needFallback) return '';
-  return `
-    <button class="btn btn--small" data-act="export-copy-text">
-      ${esc(EXPORT_COPY_BUTTON)}
-    </button>
-    <button class="btn btn--ghost btn--small" data-act="export-download">
-      ${esc(EXPORT_FALLBACK_BUTTON)}
-    </button>
-    <p class="hint">${esc(EXPORT_FALLBACK_NOTE)}</p>`;
-}
+/**
+ * Доставка. У всех трёх путей одно общее: копия собирается из текущих
+ * данных и уходит целиком. Обрезки и «почти отправили» нет.
+ */
 
-async function shareCopy() {
-  const { file } = makeCopyFile();
+/**
+ * «Отправить»: системный лист с файлом копии (там будет Telegram и всё
+ * остальное). Ветку решает canShare({files}), а не наличие share:
+ * «браузер не умеет» — не сбой, и текст у него другой.
+ */
+async function sendCopy() {
+  const text = buildCopy();
+  const { file } = makeCopyFile(text);
   shareError = '';
   shareMessage = '';
+
+  if (typeof navigator.share !== 'function') {
+    shareError = 'navigator.share отсутствует';
+    notice = EXPORT_SHARE_UNAVAILABLE;
+    render();
+    return;
+  }
+  if (canShareFiles(file) === false) {
+    shareError = 'canShare({files}) === false';
+    notice = EXPORT_SHARE_CANT;
+    render();
+    return;
+  }
+
   try {
     await navigator.share({ files: [file] });
   } catch (e) {
@@ -1232,71 +1620,36 @@ async function shareCopy() {
     if (shareOutcome(e) === 'silent') return;
     shareError = e?.name || 'без имени';
     shareMessage = e?.message || '';
-    needFallback = true;
     notice = EXPORT_SHARE_FAILED;
     render();
     return;
   }
-  needFallback = false;
   notice = EXPORT_SHARE_DONE;
   render();
 }
 
-/** Текст копии в буфер: работает и там, где файл не уходит и скачивание молчит. */
+/** Текст копии в буфер: работает и там, где файл не уходит. */
 async function copyExportText() {
-  try {
-    const payload = buildExport(data, SITE_VERSION);
-    const ok = await copyText(JSON.stringify(payload, null, 2));
-    notice = ok ? EXPORT_COPY_DONE : EXPORT_COPY_FAILED;
-  } catch {
-    notice = EXPORT_COPY_FAILED;
-  }
+  const ok = await copyText(buildCopy());
+  notice = ok ? EXPORT_COPY_DONE : EXPORT_COPY_FAILED;
   render();
 }
 
+/** «Скачать файл»: файл отдаётся браузеру; сохранение не подтверждается. */
 function downloadCopy() {
   try {
-    const { name, file } = makeCopyFile();
+    const { name, file } = makeCopyFile(buildCopy());
     const url = URL.createObjectURL(file);
     const a = document.createElement('a');
     a.href = url;
     a.download = name;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
-    needFallback = false;
     notice = EXPORT_DONE;
   } catch {
     notice = EXPORT_FAILED;
   }
   render();
-}
-
-async function saveCopy() {
-  const target = currentCopyTarget();
-  shareError = '';
-  shareMessage = '';
-
-  if (target === COPY_SHARE) return shareCopy();
-
-  // «Не умеет» — не сбой: попытки не было, поэтому и текст другой.
-  // Сразу фолбэки, без броска в пустоту.
-  if (target === COPY_NO_SHARE) {
-    shareError = 'navigator.share отсутствует';
-    needFallback = true;
-    notice = EXPORT_SHARE_UNAVAILABLE;
-    render();
-    return;
-  }
-
-  if (target === COPY_CANT_SHARE) {
-    shareError = 'canShare({files}) === false';
-    needFallback = true;
-    notice = EXPORT_SHARE_CANT;
-    render();
-    return;
-  }
-
-  downloadCopy();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1340,6 +1693,15 @@ const MOUNT = {
 
   more() {
     refreshPersist();
+
+    // значение поля живёт в переменной, а не в DOM: экран перерисовывается
+    // после каждого действия, и без этого ввод бы пропадал
+    const paste = document.getElementById('paste-text');
+    if (paste) {
+      paste.addEventListener('input', () => {
+        pasteText = paste.value;
+      });
+    }
   },
 };
 
@@ -1605,7 +1967,15 @@ document.addEventListener('click', async (e) => {
     /* -------------------------- память о навыках ----------------- */
 
     case 'help': {
-      data.help = bump(data.help, id, el.dataset.v, Date.now());
+      const answer = el.dataset.v;
+      const now = Date.now();
+      data.help = bump(data.help, id, answer, now);
+      // «помогло» прицепляется к черновику записи: только этот ответ,
+      // только известный навык, только один раз и не старше 30 минут.
+      if (answer === 'yes' && SKILLS[id] && !draft.helped.includes(id)) {
+        draft.helped.push(id);
+        draft.helpedAt[id] = now;
+      }
       save();
       skillCtx = null;
       current = { name: 'done', id: null };
@@ -1702,12 +2072,24 @@ document.addEventListener('click', async (e) => {
         mood: draft.mood,
         tags: [...draft.tags],
         note: draft.note.trim(),
+        helped: draftHelped(now),
       });
       save();
-      draft = { mood: null, tags: new Set(), note: '' };
+      draft = { mood: null, tags: new Set(), note: '', helped: [], helpedAt: {} };
       render();
       break;
     }
+
+    case 'filter':
+      listFilter = el.dataset.tag || null;
+      render();
+      break;
+
+    case 'draft-unhelp':
+      draft.helped = draft.helped.filter((x) => x !== id);
+      delete draft.helpedAt[id];
+      render();
+      break;
 
     /* -------------------------- прочее --------------------------- */
 
@@ -1720,6 +2102,11 @@ document.addEventListener('click', async (e) => {
           localStorage.removeItem(SEEN);
           // и диагностику: после «стереть всё» она не должна оставаться
           localStorage.removeItem(DEBUG);
+          // и карантин повреждённых копий: «стереть всё» — это про всё
+          for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith('opora.corrupt.')) localStorage.removeItem(k);
+          }
         } catch {
           /* приватный режим */
         }
@@ -1728,16 +2115,30 @@ document.addEventListener('click', async (e) => {
       }
       break;
 
-    case 'export':
-      await saveCopy();
+    case 'export-send':
+      await sendCopy();
       break;
 
     case 'export-download':
-      downloadCopy();
+      await downloadCopy();
       break;
 
     case 'export-copy-text':
       await copyExportText();
+      break;
+
+    // восстановление текстом: буфер, а если не дал — поле для вставки
+    case 'paste':
+      await pasteFromClipboard();
+      break;
+
+    case 'paste-parse':
+      await importText(pasteText);
+      break;
+
+    // повреждённое хранилище: выгружаем сырьё, а не собранные данные
+    case 'export-copy-raw':
+      await copyCorruptText();
       break;
 
     // пять тапов по строке версии в «О приложении»: диагностика без адреса
@@ -1759,7 +2160,9 @@ document.addEventListener('click', async (e) => {
     case 'import': {
       const input = document.createElement('input');
       input.type = 'file';
-      input.accept = 'application/json,.json';
+      // формат решает содержимое, а не расширение: копию пересылают
+      // в мессенджере и она приходит под любым именем
+      input.accept = 'application/json,.json,.txt,text/plain';
       input.addEventListener('change', () => {
         const file = input.files?.[0];
         if (file) applyImport(file);

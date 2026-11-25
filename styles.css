@@ -528,7 +528,8 @@ button {
 
 textarea,
 input[type='text'],
-input[type='tel'] {
+input[type='tel'],
+input[type='password'] {
   width: 100%;
   padding: 13px 14px;
   border-radius: 13px;
@@ -767,6 +768,58 @@ input::placeholder {
   color: var(--muted);
   font-size: 14px;
   padding: 6px 0 22px;
+}
+
+/* Фильтр списка записей: это про просмотр, а не про новую запись. */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0 14px;
+}
+
+.chip {
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.chip.on {
+  background: var(--accent-soft);
+  border-color: #3d6a62;
+  color: #cdeee5;
+}
+
+/* «Помогало» — факт из её записей, а не совет и не обещание. */
+.helped {
+  font-size: 14.5px;
+  line-height: 1.45;
+  color: #cfdada;
+  margin: 0 0 10px;
+}
+
+.helped--past {
+  color: var(--accent);
+  margin: 14px 0 18px;
+}
+
+.helped--draft {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  color: var(--muted);
+}
+
+.shown {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 2px 0 18px;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1064,11 +1117,66 @@ input::placeholder {
   margin: 12px 0 0;
 }
 
+/* Копия и восстановление: два блока на «Ещё», каждый со своими кнопками. */
+.copy {
+  margin: 26px 0 0;
+  padding: 18px 17px 20px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.copy__title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 12px;
+}
+
+.copy .btn {
+  margin-top: 10px;
+}
+
+.copy .hint {
+  margin: 10px 0 0;
+  font-size: 15px;
+}
+
 .status {
   margin: 10px 0 0;
   font-size: 17px;
   line-height: 1.4;
   color: var(--accent);
+}
+
+/* Не записалось или хранилище повреждено: виднее любого экрана,
+   но всё равно читаемо и без крика. */
+.alert {
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: rgba(226, 138, 122, 0.12);
+  border: 1px solid rgba(226, 138, 122, 0.34);
+}
+
+.alert__title {
+  font-size: 17px;
+  font-weight: 600;
+  color: #f0b7ad;
+  margin-bottom: 6px;
+}
+
+.alert__text {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.45;
+  color: #e9c9c2;
+}
+
+.alert .status {
+  color: #f0b7ad;
 }
 
 /* Диагностика: включается пятью тапами по строке версии (или ?debug=1) */
