@@ -780,6 +780,13 @@ input::placeholder {
   white-space: pre-wrap;
 }
 
+.entry__sleep {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+
 .spark {
   display: flex;
   align-items: flex-end;
@@ -827,6 +834,205 @@ input::placeholder {
   background: var(--accent-soft);
   border-color: #3d6a62;
   color: #cdeee5;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Приём: список, отметка дня, сон                                    */
+/* ------------------------------------------------------------------ */
+
+/* Отметка приёма молчит, когда ничего не нажато: ни счётчика, ни «не отмечено». */
+.marks {
+  margin: 18px 0 10px;
+  padding: 14px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.marks__title {
+  font-size: 13.5px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+/* Строка на препарат: имя сверху, две кнопки под ним. */
+.marks__med + .marks__med {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.marks__name {
+  font-size: 15px;
+  line-height: 1.4;
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+
+.marks__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mark {
+  flex: 1;
+  min-width: 132px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 14.5px;
+  line-height: 1.25;
+}
+
+.mark.on {
+  background: var(--accent-soft);
+  border-color: #3d6a62;
+  color: #cdeee5;
+}
+
+/* «Не приняла» — это тоже ответ, а не провал. Зелёная подсветка читалась бы
+   как «молодец», поэтому у этой строки нейтральный фон: отметка видна,
+   оценки нет. */
+.mark.on[data-state='skipped'] {
+  background: var(--surface-2);
+  border-color: #55666d;
+  color: var(--text);
+}
+
+/* Строка сна: необязательное поле, поэтому без подсветки «не заполнено». */
+.sleep {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  align-items: flex-end;
+  margin: 16px 0 4px;
+}
+
+.sleep__cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sleep__t {
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.sleep__in {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sleep__in input {
+  width: 5.5em;
+  padding: 11px 12px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+}
+
+.sleep__nap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 2px;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font: inherit;
+  font-size: 14.5px;
+  text-align: left;
+}
+
+.sleep__box {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.sleep__nap.on .sleep__box {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Список препаратов: строки, а не карточки — их читают, а не листают. */
+.med {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.med__name {
+  font-size: 16.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.med__meta {
+  font-size: 13.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.med--stopped {
+  opacity: 0.75;
+}
+
+.med__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.med__row .btn {
+  width: auto;
+  margin: 0;
+}
+
+.meds__h {
+  margin: 22px 0 4px;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.medform {
+  margin: 18px 0;
+}
+
+.field > span {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.field input {
+  width: 100%;
+  padding: 13px 14px;
+  border-radius: 13px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.55;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 /* «Помогало» — факт из её записей, а не совет и не обещание. */

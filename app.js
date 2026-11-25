@@ -3,6 +3,39 @@ import {
   SKILLS,
   TRIAGE,
   CRISIS_FIELDS,
+  AFTER_MEDS_CARD,
+  AFTER_MEDS_CONTACTS,
+  MEDS_TITLE,
+  MEDS_LEAD,
+  MEDS_LINK,
+  MEDS_EMPTY,
+  MEDS_ADD,
+  MEDS_EDIT,
+  MEDS_STOP,
+  MEDS_RESUME,
+  MEDS_SAVE,
+  MEDS_CANCEL,
+  MEDS_STOPPED_TITLE,
+  MED_NAME_LABEL,
+  MED_NAME_PLACEHOLDER,
+  MED_NAME_EMPTY,
+  MED_HOW_LABEL,
+  MED_HOW_PLACEHOLDER,
+  MED_SINCE_LABEL,
+  MED_MODE_LABEL,
+  MED_MODE_REGULAR,
+  MED_MODE_ASNEEDED,
+  MED_SINCE,
+  MED_STOPPED_AT,
+  MARKS_TITLE,
+  MARK_TAKEN,
+  MARK_SKIPPED,
+  SLEEP_LABEL,
+  SLEEP_UNIT,
+  SLEEP_NAP,
+  SLEEP_LINE,
+  SLEEP_NAP_LINE,
+  MONTHS_GEN,
   DEFAULT_CONTACTS,
   LEGACY_CONTACTS,
   KIDS_TITLE,
@@ -115,6 +148,17 @@ import {
   timesWord,
   LIST_LIMIT,
 } from './topics.js';
+import {
+  dayKey,
+  activeMeds,
+  stoppedMeds,
+  lastChange,
+  currentSince,
+  markOf,
+  toggleMed,
+  markableMeds,
+  sleepText,
+} from './meds.js';
 
 /* ------------------------------------------------------------------ */
 /*  Состояние                                                          */
@@ -319,7 +363,13 @@ let activeTab = 'home';
 let stepIdx = 0;
 let cardEdit = false;
 let contactsEdit = false;
-let draft = { mood: null, tags: new Set(), note: '', helped: [], helpedAt: {} };
+// форма препарата: null — закрыта, 'new' — добавление, иначе id препарата
+let medEdit = null;
+// режим в открытой форме: 'regular' | 'asneeded'
+let medMode = 'regular';
+// набранное в форме при перерисовке (переключение режима): null — из данных
+let medDraft = null;
+let draft = { mood: null, tags: new Set(), note: '', helped: [], helpedAt: {}, sleepH: '', nap: false };
 // какие записи показать в списке: null — все, иначе метка. В данные не пишется.
 let listFilter = null;
 // «помогло» прицепляется к записи, только если ответ свежий: запись
@@ -369,6 +419,20 @@ const fmtDate = (t) =>
     minute: '2-digit',
   });
 
+/**
+ * День `YYYY-MM-DD` словами: «14 марта». Считается как местная дата, а не
+ * как момент времени: `new Date('2026-03-14')` — это UTC и в минусовых
+ * поясах даёт 13 марта, поэтому разбираем строку сами.
+ */
+const fmtDay = (d) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d || ''));
+  if (!m) return String(d || '');
+  const month = MONTHS_GEN[Number(m[2]) - 1] || '';
+  return `${Number(m[3])} ${month}`.trim();
+};
+
+const medModeLabel = (mode) => (mode === 'asneeded' ? MED_MODE_ASNEEDED : MED_MODE_REGULAR);
+
 /** Подстановка в шаблон из content.js: {name}, {n}, {m}, {names}. */
 const fill = (tpl, vars) =>
   String(tpl).replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
@@ -399,8 +463,53 @@ const entryBlock = (e) => `
       <span class="entry__mood">${esc(MOOD_WORDS[e.mood - 1] || '')}</span>
     </div>
     ${e.tags?.length ? `<div class="entry__tags">${esc(e.tags.join(' · '))}</div>` : ''}
+    ${
+      sleepText(e, { line: SLEEP_LINE, nap: SLEEP_NAP_LINE })
+        ? `<div class="entry__sleep">${esc(
+            sleepText(e, { line: SLEEP_LINE, nap: SLEEP_NAP_LINE }),
+          )}</div>`
+        : ''
+    }
     ${e.note ? `<div class="entry__note">${esc(e.note)}</div>` : ''}
   </div>`;
+
+/**
+ * Отметка приёма — строка на каждый препарат: имя и две кнопки. Показывается
+ * только когда есть что отмечать, и молчит, когда ничего не нажато: ни
+ * счётчика, ни подписи «не отмечено», ни красного. Повторное нажатие снимает
+ * отметку только у этой строки: у соседнего препарата своя.
+ */
+function marksBlock() {
+  const active = markableMeds(data.meds);
+  if (!active.length) return '';
+  const day = dayKey();
+  // Один шаблон кнопки на оба состояния: подписи берутся из content.js,
+  // а не переписываются второй раз в разметке.
+  const button = (m, state, label) => `
+          <button class="mark ${markOf(data.marks, day, m.id) === state ? 'on' : ''}"
+            data-act="mark" data-med="${esc(m.id)}" data-state="${state}">
+            ${esc(label)}
+          </button>`;
+  const rows = active
+    .map(
+      (m) => `
+      <div class="marks__med">
+        <div class="marks__name">${esc(m.name)}</div>
+        <div class="marks__row">${button(m, 'taken', MARK_TAKEN)}${button(
+          m,
+          'skipped',
+          MARK_SKIPPED,
+        )}
+        </div>
+      </div>`,
+    )
+    .join('');
+  return `
+    <div class="marks">
+      <div class="marks__title">${esc(MARKS_TITLE)}</div>
+      ${rows}
+    </div>`;
+}
 
 /**
  * Строка «в прошлый раз помогало» для развилки. Показывается только когда
@@ -534,6 +643,8 @@ function back() {
 function switchTab(name) {
   cardEdit = false;
   contactsEdit = false;
+  medEdit = null;
+  medDraft = null;
   skillCtx = null;
   stepIdx = 0;
   // фильтр списка — про просмотр, а не про данные: на другой вкладке он
@@ -570,6 +681,8 @@ window.addEventListener('popstate', () => {
   nav = next.stack;
   cardEdit = false;
   contactsEdit = false;
+  medEdit = null;
+  medDraft = null;
   notice = '';
   render();
 
@@ -606,6 +719,17 @@ function render() {
   }
 
   MOUNT[current.name]?.(current.id);
+}
+
+/**
+ * Форма препарата открывается ниже списка. Без прокрутки нажатие «Добавить»
+ * выглядит как «ничего не произошло», и человек нажимает второй раз.
+ */
+function revealMedForm() {
+  requestAnimationFrame(() => {
+    const el = view.querySelector('.medform');
+    if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -941,6 +1065,8 @@ const SCREENS = {
             </div>`;
         }).join('')}
 
+        <div class="safety">${esc(AFTER_MEDS_CARD)}</div>
+
         <button class="btn" data-act="card-edit">${empty ? 'Заполнить' : 'Изменить'}</button>
         <button class="btn btn--ghost" data-act="go" data-screen="contacts">Контакты и звонки</button>
       </div>`;
@@ -987,6 +1113,7 @@ const SCREENS = {
         <header class="head">
           <h1>Контакты</h1>
         </header>
+        <div class="safety">${esc(AFTER_MEDS_CONTACTS)}</div>
         ${data.contacts.map(contactLink).join('')}
         <h2 class="section">${esc(KIDS_TITLE)}</h2>
         ${KIDS_CONTACTS.map(contactLink).join('')}
@@ -1011,6 +1138,12 @@ const SCREENS = {
           <p class="lead">Совсем не обязательно. Никаких серий и напоминаний здесь нет.</p>
         </header>
 
+        ${marksBlock()}
+
+        <button class="btn btn--ghost btn--small" data-act="go" data-screen="meds">
+          ${esc(MEDS_LINK)}
+        </button>
+
         <div class="mood">
           ${MOOD_WORDS.map(
             (w, i) => `
@@ -1028,6 +1161,22 @@ const SCREENS = {
               ${esc(t)}
             </button>`,
           ).join('')}
+        </div>
+
+        <div class="sleep">
+          <label class="sleep__cell" for="sleep-h">
+            <span class="sleep__t">${esc(SLEEP_LABEL)}</span>
+            <span class="sleep__in">
+              <input id="sleep-h" type="number" inputmode="decimal" min="0" max="24" step="0.5"
+                value="${esc(draft.sleepH)}">
+              <span>${esc(SLEEP_UNIT)}</span>
+            </span>
+          </label>
+          <button class="sleep__nap ${draft.nap ? 'on' : ''}" data-act="sleep-nap"
+            role="switch" aria-checked="${draft.nap ? 'true' : 'false'}">
+            <span class="sleep__box" aria-hidden="true"></span>
+            <span>${esc(SLEEP_NAP)}</span>
+          </button>
         </div>
 
         ${lastHelpedLine()}
@@ -1112,6 +1261,108 @@ const SCREENS = {
       </div>`;
   },
 
+  /* ------------------------------ приём --------------------------- */
+
+  meds() {
+    const active = activeMeds(data.meds);
+    const stopped = stoppedMeds(data.meds);
+
+    const ghost = (act, id, label) =>
+      `<button class="btn btn--ghost btn--small" data-act="${act}" data-id="${esc(
+        id,
+      )}">${esc(label)}</button>`;
+
+    const row = (m) => {
+      const last = lastChange(m);
+      const since = currentSince(m);
+      const meta = [
+        last?.how ? last.how : '',
+        medModeLabel(m.mode),
+        since && !m.stoppedAt ? fill(MED_SINCE, { d: fmtDay(since) }) : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+      return `
+        <div class="med ${m.stoppedAt ? 'med--stopped' : ''}">
+          <div class="med__name">${esc(m.name)}</div>
+          ${meta ? `<div class="med__meta">${esc(meta)}</div>` : ''}
+          ${
+            m.stoppedAt
+              ? `<div class="med__meta">${esc(
+                  fill(MED_STOPPED_AT, { d: fmtDay(m.stoppedAt) }),
+                )}</div>`
+              : ''
+          }
+          <div class="med__row">
+            ${
+              m.stoppedAt
+                ? ghost('med-resume', m.id, MEDS_RESUME)
+                : `${ghost('med-edit', m.id, MEDS_EDIT)}${ghost('med-stop', m.id, MEDS_STOP)}`
+            }
+          </div>
+        </div>`;
+    };
+
+    const form = () => {
+      if (!medEdit) {
+        return `<button class="btn btn--primary" data-act="med-add">${esc(MEDS_ADD)}</button>`;
+      }
+      const m = medEdit === 'new' ? null : data.meds.find((x) => x.id === medEdit);
+      const last = m ? lastChange(m) : null;
+      const name = medDraft?.name ?? m?.name ?? '';
+      const how = medDraft?.how ?? last?.how ?? '';
+      const d = medDraft?.d || dayKey();
+      return `
+        <div class="medform">
+          <label class="field" for="med-name">
+            <span>${esc(MED_NAME_LABEL)}</span>
+            <input id="med-name" value="${esc(name)}"
+              placeholder="${esc(MED_NAME_PLACEHOLDER)}">
+          </label>
+          <label class="field" for="med-how">
+            <span>${esc(MED_HOW_LABEL)}</span>
+            <input id="med-how" value="${esc(how)}"
+              placeholder="${esc(MED_HOW_PLACEHOLDER)}">
+          </label>
+          <label class="field" for="med-date">
+            <span>${esc(MED_SINCE_LABEL)}</span>
+            <input id="med-date" type="date" value="${esc(d)}">
+          </label>
+          <div class="chips" role="group" aria-label="${esc(MED_MODE_LABEL)}">
+            <button class="chip ${medMode === 'regular' ? 'on' : ''}"
+              data-act="med-mode" data-mode="regular">${esc(MED_MODE_REGULAR)}</button>
+            <button class="chip ${medMode === 'asneeded' ? 'on' : ''}"
+              data-act="med-mode" data-mode="asneeded">${esc(MED_MODE_ASNEEDED)}</button>
+          </div>
+          <button class="btn btn--primary" data-act="med-save">${esc(MEDS_SAVE)}</button>
+          <button class="btn btn--ghost btn--small" data-act="med-cancel">
+            ${esc(MEDS_CANCEL)}
+          </button>
+        </div>`;
+    };
+
+    return `
+      <div class="screen">
+        <button class="back" data-act="back">‹ назад</button>
+        <header class="head">
+          <div class="eyebrow">дневник</div>
+          <h1>${esc(MEDS_TITLE)}</h1>
+          <p class="lead">${esc(MEDS_LEAD)}</p>
+        </header>
+        ${statusBlock()}
+        ${active.map(row).join('')}
+        ${!data.meds.length ? `<div class="empty">${esc(MEDS_EMPTY)}</div>` : ''}
+        ${form()}
+        ${
+          stopped.length
+            ? `<div class="meds__h">${esc(MEDS_STOPPED_TITLE)}</div>${stopped.map(row).join('')}`
+            : ''
+        }
+        <div class="safety">${esc(AFTER_MEDS_CARD)}</div>
+      </div>`;
+  },
+
   /* ------------------------------ темы --------------------------- */
 
   topics() {
@@ -1185,6 +1436,9 @@ const SCREENS = {
   /* ------------------------------ прочее -------------------------- */
 
   more() {
+    // «Отправить» — только там, где системный лист есть: кнопка, которая
+    // заведомо ответит «не умеет», — тупик. Два других пути есть всегда.
+    const canSend = typeof navigator.share === 'function';
     return `
       <div class="screen">
         <button class="back" data-act="back">‹ назад</button>
@@ -1198,8 +1452,12 @@ const SCREENS = {
 
         <section class="copy">
           <h2 class="copy__title">Копия</h2>
-          <button class="btn btn--primary" data-act="export-send">${esc(EXPORT_SEND_BUTTON)}</button>
-          <button class="btn" data-act="export-download">${esc(EXPORT_DOWNLOAD_BUTTON)}</button>
+          ${
+            canSend
+              ? `<button class="btn btn--primary" data-act="export-send">${esc(EXPORT_SEND_BUTTON)}</button>`
+              : ''
+          }
+          <button class="btn ${canSend ? '' : 'btn--primary'}" data-act="export-download">${esc(EXPORT_DOWNLOAD_BUTTON)}</button>
           <button class="btn btn--ghost btn--small" data-act="export-copy-text">
             ${esc(EXPORT_COPY_BUTTON)}
           </button>
@@ -1737,10 +1995,18 @@ const MOUNT = {
 
   diary() {
     const note = document.getElementById('note');
-    if (!note) return;
-    note.addEventListener('input', () => {
-      draft.note = note.value;
-    });
+    if (note) {
+      note.addEventListener('input', () => {
+        draft.note = note.value;
+      });
+    }
+    // сон — необязательное поле: оно не подсвечивается и ничего не требует
+    const sleep = document.getElementById('sleep-h');
+    if (sleep) {
+      sleep.addEventListener('input', () => {
+        draft.sleepH = sleep.value;
+      });
+    }
   },
 
   more() {
@@ -1939,6 +2205,10 @@ document.addEventListener('click', async (e) => {
     case 'go':
       stepIdx = 0;
       if (el.dataset.screen !== 'card') cardEdit = false;
+      if (el.dataset.screen !== 'meds') {
+        medEdit = null;
+        medDraft = null;
+      }
       if (el.dataset.screen === 'home' || el.dataset.screen === 'triage') skillCtx = null;
       // вошли в навык — после него спросим «помогло?» именно про него
       if (el.dataset.screen === 'skill') skillCtx = id;
@@ -2109,6 +2379,12 @@ document.addEventListener('click', async (e) => {
       break;
     }
 
+    case 'sleep-nap':
+      // черновик уже держит введённые часы: input обновляет draft.sleepH
+      draft.nap = !draft.nap;
+      render();
+      break;
+
     case 'save-entry': {
       if (!draft.mood) {
         el.textContent = 'Сначала выбери, как ты';
@@ -2118,16 +2394,32 @@ document.addEventListener('click', async (e) => {
         break;
       }
       const now = Date.now();
-      data.entries.push({
+      const entry = {
         t: now,
         ts: now,
         mood: draft.mood,
         tags: [...draft.tags],
         note: draft.note.trim(),
         helped: draftHelped(now),
-      });
+      };
+      // Сон необязателен. Пустое поле — это не «0 часов»: поля просто нет.
+      // 0, введённый руками, — наоборот, утверждение, и он сохраняется.
+      const hRaw = (document.getElementById('sleep-h')?.value || '').trim();
+      const h = hRaw === '' ? null : Number(hRaw.replace(',', '.'));
+      if (h !== null && Number.isFinite(h) && h >= 0 && h <= 24) entry.sleepH = h;
+      if (draft.nap === true) entry.nap = true;
+
+      data.entries.push(entry);
       save();
-      draft = { mood: null, tags: new Set(), note: '', helped: [], helpedAt: {} };
+      draft = {
+        mood: null,
+        tags: new Set(),
+        note: '',
+        helped: [],
+        helpedAt: {},
+        sleepH: '',
+        nap: false,
+      };
       render();
       break;
     }
@@ -2142,6 +2434,123 @@ document.addEventListener('click', async (e) => {
       delete draft.helpedAt[id];
       render();
       break;
+
+    /* --------------------------- приём ---------------------------- */
+
+    case 'mark':
+      // Строка одна: отметка ставится тому препарату, по которому нажали,
+      // а повторный тап тем же состоянием снимает её — нажавшая не то
+      // не должна оказаться запертой.
+      data.marks = toggleMed(data.marks, dayKey(), el.dataset.med, el.dataset.state, Date.now());
+      save();
+      render();
+      break;
+
+    case 'med-add':
+      medEdit = 'new';
+      medMode = 'regular';
+      medDraft = null;
+      notice = '';
+      render();
+      revealMedForm();
+      break;
+
+    case 'med-cancel':
+      medEdit = null;
+      medDraft = null;
+      notice = '';
+      render();
+      break;
+
+    case 'med-edit': {
+      const m = data.meds.find((x) => x.id === id);
+      if (!m) break;
+      medEdit = m.id;
+      medMode = m.mode;
+      medDraft = null;
+      notice = '';
+      render();
+      revealMedForm();
+      break;
+    }
+
+    case 'med-mode':
+      // перерисовка не должна стереть уже набранное в форме
+      medDraft = {
+        name: document.getElementById('med-name')?.value || '',
+        how: document.getElementById('med-how')?.value || '',
+        d: document.getElementById('med-date')?.value || '',
+      };
+      medMode = el.dataset.mode === 'asneeded' ? 'asneeded' : 'regular';
+      render();
+      break;
+
+    case 'med-save': {
+      const name = (document.getElementById('med-name')?.value || '').trim();
+      const how = (document.getElementById('med-how')?.value || '').trim();
+      const dInput = (document.getElementById('med-date')?.value || '').trim();
+      const d = /^\d{4}-\d{2}-\d{2}$/.test(dInput) ? dInput : dayKey();
+      if (!name) {
+        notice = MED_NAME_EMPTY;
+        render();
+        break;
+      }
+      const ts = Date.now();
+      if (medEdit === 'new') {
+        data.meds.push({
+          id: 'm' + ts.toString(36),
+          name,
+          changes: [{ d, how }],
+          mode: medMode,
+          stoppedAt: '',
+          ts,
+        });
+      } else {
+        const m = data.meds.find((x) => x.id === medEdit);
+        if (m) {
+          const prevHow = lastChange(m)?.how || '';
+          m.name = name;
+          m.mode = medMode;
+          m.ts = ts;
+          // Пустая правка не рождает строку в истории схемы.
+          if (how !== prevHow) {
+            const at = m.changes.findIndex((c) => c.d === d);
+            if (at >= 0) m.changes[at] = { ...m.changes[at], how };
+            else m.changes.push({ d, how });
+            m.changes.sort((a, b) => String(a.d).localeCompare(String(b.d)));
+          }
+        }
+      }
+      medEdit = null;
+      medDraft = null;
+      notice = '';
+      save();
+      render();
+      break;
+    }
+
+    case 'med-stop': {
+      const m = data.meds.find((x) => x.id === id);
+      if (m) {
+        // «Убрать» не удаляет: иначе вместе с препаратом пропали бы отметки
+        m.stoppedAt = dayKey();
+        m.ts = Date.now();
+        save();
+      }
+      render();
+      break;
+    }
+
+    case 'med-resume': {
+      const m = data.meds.find((x) => x.id === id);
+      if (m) {
+        m.stoppedAt = '';
+        m.ts = Date.now();
+        save();
+      }
+      render();
+      break;
+    }
 
     /* -------------------------- прочее --------------------------- */
 

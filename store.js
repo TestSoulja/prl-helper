@@ -23,8 +23,9 @@ export const APP = 'opora';
 // правке структуры; каждая версия схемы обязана иметь миграцию ниже.
 // Схема 1 — всё до 0.5.0 (номера в данных не было), схема 2 — номер есть,
 // неизвестные поля сохраняются на всех уровнях, схема 3 — у записи есть
-// список навыков, которые тогда помогли (helped).
-export const SCHEMA_VERSION = 3;
+// список навыков, которые тогда помогли (helped), схема 4 — препараты
+// (meds), отметки приёма (marks) и сон в записи (sleepH, nap).
+export const SCHEMA_VERSION = 4;
 
 /**
  * Миграции по одной ступени: ключ — схема, из которой переходим.
@@ -43,6 +44,17 @@ const MIGRATIONS = {
     entries: Array.isArray(data.entries)
       ? data.entries.map((e) => (obj(e) ? { ...e, helped: helpedList(e.helped) } : e))
       : data.entries,
+  }),
+  // 0.7.x → 0.8.0. Появляются препараты и отметки приёма. У старых данных
+  // их нет — пустые массивы, и это правда: списка не было. Записям НЕ
+  // добавляются sleepH и nap: «0 часов сна» и «днём не спала» —
+  // утверждения, которых человек не делал. Отсутствует — значит не
+  // спрашивали, и в отчёте этой строки просто нет.
+  3: (data) => ({
+    ...data,
+    schema: 4,
+    meds: Array.isArray(data.meds) ? data.meds : [],
+    marks: Array.isArray(data.marks) ? data.marks : [],
   }),
 };
 
@@ -163,14 +175,43 @@ function helpedList(v) {
 
 function toEntry(e) {
   const given = num(e.ts) || num(e.t);
+  // sleepH и nap НЕ заполняются по умолчанию: отсутствие — это «не
+  // спрашивали», а не «0 часов» и не «днём не спала».
   return { ...e, t: num(e.t) || given, ts: given, helped: helpedList(e.helped) };
+}
+
+/** Режим приёма: ровно два. Третьего («иногда») нет — он ничего не значит. */
+export const MED_MODES = ['regular', 'asneeded'];
+
+/** Состояние отметки: ровно два. «Нет отметки» выводится из отсутствия записи. */
+export const MARK_STATES = ['taken', 'skipped'];
+
+function toChange(c) {
+  return { ...c, d: txt(c.d), how: txt(c.how) };
+}
+
+function toMed(m) {
+  return {
+    ...m,
+    id: txt(m.id),
+    name: txt(m.name),
+    changes: Array.isArray(m.changes) ? m.changes.filter(obj).map(toChange) : [],
+    mode: MED_MODES.includes(m.mode) ? m.mode : 'regular',
+    stoppedAt: txt(m.stoppedAt),
+    ts: num(m.ts),
+  };
+}
+
+function toMark(k) {
+  // state не подменяем на «taken»: выдуманная отметка хуже отсутствующей.
+  return { ...k, d: txt(k.d), med: txt(k.med), state: txt(k.state), ts: num(k.ts) };
 }
 
 /**
  * Приводит любые прочитанные данные к известной форме. Не меняет вход.
  * Это именно приведение типов, а не миграция: неизвестные поля остаются
- * на всех уровнях (верхний, card, записи, контакты, help[id]), иначе копия
- * из будущей версии потеряла бы данные при следующем сохранении.
+ * на всех уровнях (верхний, card, записи, контакты, help[id], препараты),
+ * иначе копия из будущей версии потеряла бы данные при следующем сохранении.
  */
 export function normalize(raw) {
   const src = obj(raw) || {};
@@ -194,6 +235,8 @@ export function normalize(raw) {
     contacts: Array.isArray(src.contacts) ? src.contacts.filter(obj).map((c) => ({ ...c })) : [],
     contactsTs: num(src.contactsTs),
     entries,
+    meds: Array.isArray(src.meds) ? src.meds.filter(obj).map(toMed) : [],
+    marks: Array.isArray(src.marks) ? src.marks.filter(obj).map(toMark) : [],
     letter: txt(src.letter),
     letterTs: num(src.letterTs),
     help,
@@ -232,6 +275,78 @@ export function mergeEntries(a = [], b = []) {
     }
   }
   return out.sort((x, y) => num(x.ts) - num(y.ts));
+}
+
+/**
+ * Изменения схемы приёма: объединение по дате. Одна и та же дата в двух
+ * копиях — побеждает та, что пришла из более свежей записи препарата
+ * (`bWins`), при равенстве остаётся своя. Ни одна дата не выбрасывается:
+ * «было 50 мг, стало 75» — это ровно то, что читает врач.
+ */
+function mergeChanges(a = [], b = [], bWins = false) {
+  const out = new Map();
+  for (const c of a) {
+    if (!obj(c) || !txt(c.d)) continue;
+    out.set(txt(c.d), { ...c });
+  }
+  for (const c of b) {
+    if (!obj(c) || !txt(c.d)) continue;
+    const key = txt(c.d);
+    if (!out.has(key) || bWins) out.set(key, { ...c });
+  }
+  return [...out.values()].sort((x, y) => txt(x.d).localeCompare(txt(y.d)));
+}
+
+/**
+ * Препараты: объединение по id, при конфликте побеждает более свежий ts.
+ * Препарат не выбрасывается никогда, даже если вторая копия его не знает:
+ * иначе вместе с ним пропали бы его отметки.
+ * Снятие (`stoppedAt`) решает тоже свежий ts: и «убрала», и «вернула» —
+ * событие. Иначе возврат из 0.8.0 не переживал слияние со старой копией:
+ * пустое значение проигрывало непустому, и препарат оставался снятым.
+ */
+function mergeMeds(a = [], b = []) {
+  const out = new Map();
+  for (const list of [a, b]) {
+    for (const raw of list) {
+      if (!obj(raw) || !txt(raw.id)) continue;
+      const m = toMed(raw);
+      const prev = out.get(m.id);
+      if (!prev) {
+        out.set(m.id, m);
+        continue;
+      }
+      const bWins = num(m.ts) > num(prev.ts);
+      out.set(m.id, {
+        ...prev,
+        ...m,
+        name: bWins && txt(m.name) ? txt(m.name) : txt(prev.name) || txt(m.name),
+        mode: bWins && MED_MODES.includes(m.mode) ? m.mode : prev.mode,
+        changes: mergeChanges(prev.changes, m.changes, bWins),
+        stoppedAt: bWins ? txt(m.stoppedAt) : txt(prev.stoppedAt),
+        ts: Math.max(num(prev.ts), num(m.ts)),
+      });
+    }
+  }
+  return [...out.values()];
+}
+
+/**
+ * Отметки приёма: ключ — день и препарат. При конфликте побеждает более
+ * свежая отметка: человек мог исправить «не приняла» на «приняла».
+ */
+function mergeMarks(a = [], b = []) {
+  const out = new Map();
+  for (const list of [a, b]) {
+    for (const raw of list) {
+      if (!obj(raw) || !txt(raw.d) || !txt(raw.med)) continue;
+      const k = toMark(raw);
+      const key = `${k.d}|${k.med}`;
+      const prev = out.get(key);
+      if (!prev || num(k.ts) > num(prev.ts)) out.set(key, k);
+    }
+  }
+  return [...out.values()].sort((x, y) => txt(x.d).localeCompare(txt(y.d)));
 }
 
 /**
@@ -281,6 +396,8 @@ const KNOWN_FIELDS = new Set([
   'contacts',
   'contactsTs',
   'entries',
+  'meds',
+  'marks',
   'letter',
   'letterTs',
   'help',
@@ -325,6 +442,8 @@ export function mergeData(a, b) {
     contacts: contacts.contacts.map((c) => ({ ...c })),
     contactsTs: Math.max(A.contactsTs, B.contactsTs),
     entries: mergeEntries(A.entries, B.entries),
+    meds: mergeMeds(A.meds, B.meds),
+    marks: mergeMarks(A.marks, B.marks),
     letter: letter.letter,
     letterTs: Math.max(A.letterTs, B.letterTs),
     help: mergeHelp(A.help, B.help),
@@ -332,12 +451,14 @@ export function mergeData(a, b) {
   };
 }
 
-/** Есть ли что терять: заполненная карточка, записи, письмо, оценки. */
+/** Есть ли что терять: заполненная карточка, записи, письмо, оценки, приём. */
 export function isDataEmpty(raw) {
   const d = normalize(raw);
   return (
     cardEmpty(d.card) &&
     d.entries.length === 0 &&
+    d.meds.length === 0 &&
+    d.marks.length === 0 &&
     d.letter.trim() === '' &&
     Object.values(d.help).every((c) => totalOf(c) === 0)
   );
