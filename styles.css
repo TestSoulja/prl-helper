@@ -120,6 +120,13 @@ p {
 }
 
 .dots {
+  /* Цель нажатия — 44 px. Кегль, цвет и отступы не меняются: растёт
+     только внешний размер, а «⋯» остаётся по центру, как и был. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
   color: var(--muted);
   font-size: 22px;
   line-height: 1;
@@ -243,7 +250,10 @@ button {
 }
 
 .back {
+  /* Цель нажатия — 44 px; текст стоит там же, добавка уходит вниз. */
   display: inline-block;
+  min-width: 44px;
+  min-height: 44px;
   color: var(--muted);
   font-size: 14px;
   padding: 4px 0 16px;
@@ -694,6 +704,8 @@ input::placeholder {
 }
 
 .tag {
+  /* Высота 41 → 44: растёт область нажатия, ширина и вид прежние. */
+  min-height: 44px;
   padding: 9px 14px;
   border-radius: 999px;
   background: var(--surface);
@@ -779,6 +791,8 @@ input::placeholder {
 }
 
 .chip {
+  /* Высота 32 → 44: цель нажатия, вид и кегль не меняются. */
+  min-height: 44px;
   padding: 7px 12px;
   border-radius: 999px;
   background: transparent;

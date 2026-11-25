@@ -51,5 +51,23 @@ export function goBack(current, stack) {
   return { moved: true, current: stack[stack.length - 1], stack: stack.slice(0, -1) };
 }
 
+/**
+ * Какие операции с историей браузера нужны для этого перехода.
+ *
+ * `back` — сколько записей пройти назад (0 — не идти).
+ * `replace` — надо ли переписать состояние записи, на которую придём.
+ *
+ * Возврат на вкладку из глубины идёт назад по своим же записям, иначе за
+ * спиной остались бы записи пройденных экранов. `go(-n)` доводит ровно до
+ * первой записи стека — корня покидаемой вкладки. Её состояние говорит
+ * о старом экране: если вкладка другая, запись надо переписать на новую;
+ * если та же — она уже правдива, и лишняя запись в историю не нужна.
+ */
+export function historyPlan(step, stack) {
+  if (step.mode !== 'replace') return { back: 0, replace: false };
+  if (!stack.length) return { back: 0, replace: true };
+  return { back: stack.length, replace: stack[0].name !== step.current.name };
+}
+
 /** То, что кладётся в window.history: только экран, ничего личного. */
 export const stateOf = (screen) => ({ opora: { screen: screen.name, id: screen.id ?? null } });

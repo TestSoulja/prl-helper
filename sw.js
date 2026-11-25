@@ -1,5 +1,5 @@
 /* Офлайн-кэш. Меняй VERSION при обновлении файлов. */
-const VERSION = 'opora-v0.6.0';
+const VERSION = 'opora-v0.7.1';
 
 const SHELL = [
   './',

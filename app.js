@@ -104,7 +104,7 @@ import {
   COPY_TEXT_BAD,
 } from './store.js';
 import { readData, writeData, clearData } from './db.js';
-import { TAB_OF, transition, goBack, stateOf } from './nav.js';
+import { TAB_OF, transition, goBack, stateOf, historyPlan } from './nav.js';
 import {
   tagsWithCounts,
   topicEntries,
@@ -309,6 +309,9 @@ async function hydrate() {
 let current = { name: 'home', id: null };
 // внутренний стек возврата; в историю браузера пишет только go()
 let nav = [];
+// состояние, которым надо переписать запись истории после перехода:
+// go(-n) асинхронен, поэтому это делается в popstate, а не сразу в go()
+let syncState = null;
 let activeTab = 'home';
 let stepIdx = 0;
 let cardEdit = false;
@@ -471,15 +474,26 @@ function go(name, id = null) {
     return;
   }
 
+  const plan = historyPlan(step, nav);
   const state = stateOf(step.current);
-  if (step.mode === 'push') window.history.pushState(state, '');
-  else if (nav.length) {
+
+  if (step.mode === 'push') {
+    // собираемся уйти с записи — недоисполненная правка предыдущего
+    // перехода к ней уже не относится
+    syncState = null;
+    window.history.pushState(state, '');
+  } else if (plan.back) {
     // Возврат на вкладку из глубины: не заменяем запись, а проходим назад
     // по своим же записям. Если просто заменить текущую, за спиной останутся
     // записи пройденных экранов и первый жест «назад» на вкладке ничего
     // не сделает — ровно та ловушка, от которой уходим.
-    window.history.go(-nav.length);
-  } else window.history.replaceState(state, '');
+    //
+    // go(-n) асинхронен: replaceState, сделанный до перехода, попал бы
+    // в покидаемую запись. Поэтому переход состоялся → поправим запись
+    // в popstate, когда она уже текущая.
+    syncState = plan.replace ? state : null;
+    window.history.go(-plan.back);
+  } else if (plan.replace) window.history.replaceState(state, '');
 
   current = step.current;
   nav = step.stack;
@@ -517,6 +531,15 @@ function switchTab(name) {
  * не вмешиваемся: пусть система закрывает приложение.
  */
 window.addEventListener('popstate', () => {
+  // Переход назад по своим записям уже состоялся. Запись, на которую
+  // пришли, могла остаться с экраном покинутой вкладки — приводим её
+  // к правде, пока экран совпадает с тем, что на нём показано.
+  if (syncState) {
+    const state = syncState;
+    syncState = null;
+    window.history.replaceState(state, '');
+  }
+
   const step = goBack(current, nav);
   if (!step.moved) return;
 
