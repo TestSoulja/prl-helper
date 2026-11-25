@@ -8,7 +8,48 @@ import {
   MOOD_TAGS,
   SAFETY_NOTE,
   GROUNDING_STEPS,
+  MESSAGES,
+  MESSAGES_TITLE,
+  MESSAGES_HINT,
+  MESSAGES_COPIED,
+  MESSAGES_FAILED,
+  HELP_QUESTION,
+  HELP_ANSWERS,
+  WEAK_LABEL,
+  CALM_BUTTON,
+  CALM_LINE,
+  CALM_EXIT,
+  CALM_MINUTES,
+  EXPORT_BUTTON,
+  EXPORT_NOTE,
+  EXPORT_DONE,
+  EXPORT_FAILED,
+  IMPORT_BUTTON,
+  IMPORT_RESULT,
+  IMPORT_ERR_JSON,
+  IMPORT_ERR_APP,
+  IMPORT_ERR_VERSION,
+  IMPORT_ERR_DATA,
+  EMPTY_TITLE,
+  EMPTY_TEXT,
+  EMPTY_IMPORT,
+  PERSIST_LABEL,
+  PERSIST_YES,
+  PERSIST_NO,
+  PERSIST_NOTE,
 } from './content.js';
+
+import { rankSkills, bump } from './rank.js';
+import {
+  normalize,
+  mergeData,
+  isDataEmpty,
+  buildExport,
+  parseImport,
+  importCounts,
+  exportName,
+} from './store.js';
+import { readData, writeData, clearData } from './db.js';
 
 /* ------------------------------------------------------------------ */
 /*  Состояние                                                          */
@@ -19,39 +60,108 @@ const SITE_VERSION =
   document.querySelector('meta[name="site-version"]')?.content || '?';
 
 const KEY = 'opora.v1';
+// отметка «приложением уже пользовались»: нужна, чтобы отличить
+// «данные вычищены» от «первый запуск»
+const SEEN = 'opora.seen';
 
 const defaults = () => ({
-  card: {},
+  ...normalize(null),
   contacts: DEFAULT_CONTACTS.map((c) => ({ ...c })),
-  entries: [],
-  letter: '',
 });
 
-const data = load();
+// была ли своя копия в localStorage: если нет — при равном времени
+// главной считается копия из IndexedDB, иначе стандартные контакты
+// перебили бы уже отредактированные
+const hadLocal = (() => {
+  try {
+    return localStorage.getItem(KEY) !== null;
+  } catch {
+    return false;
+  }
+})();
 
 function load() {
-  const base = defaults();
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return base;
+    if (!raw) return defaults();
+
     const saved = JSON.parse(raw);
-    return {
-      card: saved.card || {},
-      contacts: Array.isArray(saved.contacts) ? saved.contacts : base.contacts,
-      entries: Array.isArray(saved.entries) ? saved.entries : [],
-      letter: typeof saved.letter === 'string' ? saved.letter : '',
-    };
+    const data = normalize(saved);
+    // совсем старые записи без списка контактов — стандартный список
+    if (!Array.isArray(saved?.contacts)) {
+      data.contacts = DEFAULT_CONTACTS.map((c) => ({ ...c }));
+    }
+    return data;
   } catch {
-    return base;
+    return defaults();
+  }
+}
+
+let data = load();
+
+function markUsed() {
+  try {
+    localStorage.setItem(SEEN, '1');
+  } catch {
+    /* приватный режим — отметки не будет */
+  }
+}
+
+// раньше пользовались — значит, если данные пропали, это стоит сказать
+if (!isDataEmpty(data)) markUsed();
+
+let persistAsked = false;
+
+async function askPersist() {
+  if (persistAsked) return;
+  persistAsked = true;
+  try {
+    await navigator.storage?.persist?.();
+  } catch {
+    /* браузер отказал — покажем это в настройках как «нет» */
   }
 }
 
 function save() {
+  data.ts = Date.now();
   try {
     localStorage.setItem(KEY, JSON.stringify(data));
   } catch {
-    /* приватный режим — просто живём без сохранения */
+    /* приватный режим или переполнение — вторая копия ниже всё равно попробует */
   }
+  markUsed();
+  askPersist();
+  writeData(data);
+}
+
+/**
+ * Вторая копия при старте: читаем IndexedDB, сливаем с localStorage
+ * и раскладываем результат обратно в оба места. Если localStorage
+ * вычистили, данные поднимутся из IndexedDB.
+ */
+async function hydrate() {
+  const second = await readData();
+
+  if (!second) {
+    if (!isDataEmpty(data)) writeData(data);
+    return;
+  }
+
+  // localStorage пуст — значит своя копия «свежая» только по названию:
+  // главной считаем вторую, чтобы не потерять отредактированные контакты
+  const merged = hadLocal
+    ? mergeData(data, normalize(second))
+    : mergeData(normalize(second), data);
+  if (JSON.stringify(merged) === JSON.stringify(data)) return;
+
+  data = merged;
+  try {
+    localStorage.setItem(KEY, JSON.stringify(data));
+  } catch {
+    /* ничего страшного: в IndexedDB уже лежит */
+  }
+  writeData(data);
+  render();
 }
 
 let current = { name: 'home', id: null };
@@ -64,6 +174,12 @@ let draft = { mood: null, tags: new Set(), note: '' };
 let tick = null;
 let wakeLock = null;
 let deferredPrompt = null;
+// какой навык сейчас выполняется: нужен, чтобы после него задать один вопрос
+let skillCtx = null;
+// что показать про копию и восстановление: пусто, пока ничего не делали
+let notice = '';
+// защищено ли хранилище от очистки: null — ещё не узнали
+let persisted = null;
 
 const TAB_OF = { home: 'home', breath: 'breath', card: 'card', diary: 'diary' };
 
@@ -95,6 +211,39 @@ const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
 
 const dialable = (p) => String(p).replace(/[^\d+]/g, '');
 
+/**
+ * Копирование в буфер. Ничего не отправляет и адресатов не знает.
+ * Сначала Clipboard API, потом старый способ — он нужен там, где
+ * асинхронный API запрещён (http, встроенный браузер, старые движки).
+ */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* нет разрешения или не тот контекст — идём в фолбэк */
+  }
+
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-2000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Навигация                                                          */
 /* ------------------------------------------------------------------ */
@@ -102,11 +251,13 @@ const dialable = (p) => String(p).replace(/[^\d+]/g, '');
 function go(name, id = null) {
   history.push({ ...current });
   current = { name, id };
+  notice = '';
   render();
 }
 
 function back() {
   current = history.pop() || { name: activeTab, id: null };
+  notice = '';
   render();
 }
 
@@ -115,6 +266,8 @@ function switchTab(name) {
   current = { name, id: null };
   cardEdit = false;
   contactsEdit = false;
+  skillCtx = null;
+  notice = '';
   render();
 }
 
@@ -131,7 +284,7 @@ function render() {
 
   document.body.classList.toggle(
     'immersive',
-    current.name === 'breath' && Boolean(current.id),
+    (current.name === 'breath' && Boolean(current.id)) || current.name === 'calm',
   );
 
   const html = SCREENS[current.name]?.(current.id) ?? SCREENS.home();
@@ -166,6 +319,12 @@ const SCREENS = {
           <span class="hero__s">Подскажу, что делать</span>
         </button>
 
+        <div class="safety">${esc(SAFETY_NOTE)}</div>
+
+        ${restoreBanner()}
+
+        ${statusBlock()}
+
         <div class="quick">
           <button class="quick__item" data-act="go" data-screen="breath" data-id="sigh">
             Дыхание<span>20 секунд</span>
@@ -181,11 +340,15 @@ const SCREENS = {
           </button>
         </div>
 
+        <button class="btn btn--calm" data-act="go" data-screen="calm">
+          ${esc(CALM_BUTTON)}
+        </button>
+
         <div class="note">Здесь можно ничего не делать и ничего не объяснять.</div>
 
-        ${installBlock()}
+        ${messagesBlock()}
 
-        <div class="safety">${esc(SAFETY_NOTE)}</div>
+        ${installBlock()}
       </div>`;
   },
 
@@ -217,7 +380,9 @@ const SCREENS = {
           <h1>Попробуй это</h1>
           <p class="lead">Сверху — то, что обычно помогает быстрее всего.</p>
         </header>
-        ${t.skills.map(skillCard).join('')}
+        ${rankSkills(t.skills, data.help)
+          .map((r) => skillCard(r.id, r.weak))
+          .join('')}
         <button class="btn btn--ghost" data-act="go" data-screen="triage">
           Это не то, что со мной
         </button>
@@ -375,7 +540,8 @@ const SCREENS = {
       </div>`;
   },
 
-  done() {
+  done(id) {
+    const skill = id && SKILLS[id] ? id : null;
     return `
       <div class="screen">
         <header class="head">
@@ -385,8 +551,33 @@ const SCREENS = {
         <p class="lead">
           Не обязательно стало лучше. Достаточно, что ты не осталась с этим одна.
         </p>
+        ${
+          skill
+            ? `<section class="ask">
+                 <h2 class="ask__q">${esc(HELP_QUESTION)}</h2>
+                 <div class="ask__opts">
+                   ${HELP_ANSWERS.map(
+                     (a) =>
+                       `<button class="ask__opt" data-act="help" data-id="${skill}" data-v="${a.id}">${esc(
+                         a.label,
+                       )}</button>`,
+                   ).join('')}
+                 </div>
+               </section>`
+            : ''
+        }
         <button class="btn btn--primary" data-act="go" data-screen="triage">Ещё что-нибудь</button>
         <button class="btn" data-act="go" data-screen="home">На главную</button>
+      </div>`;
+  },
+
+  calm() {
+    return `
+      <div class="screen calm">
+        <div class="calm__halo" aria-hidden="true"></div>
+        <div class="calm__line">${esc(CALM_LINE)}</div>
+        <div class="calm__time" id="c-num">${String(CALM_MINUTES).padStart(2, '0')}:00</div>
+        <button class="btn btn--ghost calm__exit" data-act="calm-exit">${esc(CALM_EXIT)}</button>
       </div>`;
   },
 
@@ -503,6 +694,7 @@ const SCREENS = {
           )
           .join('')}
         <button class="btn" data-act="contacts-edit">Изменить список</button>
+        ${messagesBlock()}
       </div>`;
   },
 
@@ -590,9 +782,20 @@ const SCREENS = {
           <button class="grid__btn" data-act="go" data-screen="contacts">Контакты и звонки</button>
           <button class="grid__btn" data-act="go" data-screen="about">О приложении</button>
           <button class="grid__btn" data-act="install">Установить на телефон</button>
-          <button class="grid__btn" data-act="export">Скачать мои данные</button>
+          <button class="grid__btn" data-act="export">${esc(EXPORT_BUTTON)}</button>
+          <button class="grid__btn" data-act="import">${esc(IMPORT_BUTTON)}</button>
         </div>
-        <div style="height:16px"></div>
+        <p class="hint">${esc(EXPORT_NOTE)}</p>
+        ${statusBlock()}
+        <div class="persist">
+          <div class="persist__row">
+            <span>${esc(PERSIST_LABEL)}</span>
+            <span id="persist-state">${
+              persisted === null ? '—' : persisted ? esc(PERSIST_YES) : esc(PERSIST_NO)
+            }</span>
+          </div>
+          <p class="hint">${esc(PERSIST_NOTE)}</p>
+        </div>
         <button class="btn btn--ghost btn--danger" data-act="erase">Стереть всё</button>
         <div class="safety">${esc(SAFETY_NOTE)}</div>
       </div>`;
@@ -612,11 +815,12 @@ const SCREENS = {
         </p>
         <p class="muted small">
           Приложение не ставит диагнозов, ничего не считает и никуда не отправляет.
-          Все записи хранятся в памяти этого браузера на этом телефоне.
+          Все записи хранятся в этом браузере на этом телефоне — в двух местах,
+          чтобы пережить очистку одного из них.
         </p>
         <p class="muted small">
-          Если телефон потеряется или ты почистишь данные браузера — записи исчезнут.
-          Поэтому есть кнопка «Скачать мои данные».
+          Если телефон потеряется или данные браузера сотрут полностью — записи исчезнут.
+          Поэтому есть кнопка «Сохранить копию»: файл уходит в мессенджер или в файлы.
         </p>
         <div class="note">
           ${esc(SAFETY_NOTE)}
@@ -633,7 +837,7 @@ const SCREENS = {
 /*  Мелкие шаблоны                                                     */
 /* ------------------------------------------------------------------ */
 
-function skillCard(id) {
+function skillCard(id, weak = false) {
   const s = SKILLS[id];
   if (!s) return '';
   return `
@@ -641,7 +845,26 @@ function skillCard(id) {
       <div class="card__title">${esc(s.title)}</div>
       <div class="card__meta">${esc(s.meta)}</div>
       ${s.lead ? `<div class="card__lead">${esc(s.lead)}</div>` : ''}
+      ${weak ? `<div class="card__weak">${esc(WEAK_LABEL)}</div>` : ''}
     </button>`;
+}
+
+function messagesBlock() {
+  return `
+    <section class="msgs">
+      <h2 class="msgs__title">${esc(MESSAGES_TITLE)}</h2>
+      <p class="msgs__hint">${esc(MESSAGES_HINT)}</p>
+      <div class="msgs__list">
+        ${MESSAGES.map(
+          (m) => `
+          <button class="msg" data-act="copy" data-id="${m.id}">
+            <span class="msg__label">${esc(m.label)}</span>
+            <span class="msg__text">${esc(m.text)}</span>
+            <span class="msg__state" data-state="${m.id}"></span>
+          </button>`,
+        ).join('')}
+      </div>
+    </section>`;
 }
 
 function installBlock() {
@@ -651,6 +874,121 @@ function installBlock() {
     <button class="btn" data-act="install" style="margin-top:14px">
       Поставить на главный экран
     </button>`;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Копия и восстановление                                            */
+/* ------------------------------------------------------------------ */
+
+function statusBlock() {
+  if (!notice) return '';
+  return `<p class="status" role="status">${esc(notice)}</p>`;
+}
+
+/**
+ * Data может пропасть целиком: localStorage вычистили, а IndexedDB
+ * не пережила. Если приложением раньше пользовались — говорим прямо
+ * и даём кнопку импорта, а не делаем вид, что всё в порядке.
+ */
+function restoreBanner() {
+  if (!isDataEmpty(data)) return '';
+
+  let seen = false;
+  try {
+    seen = localStorage.getItem(SEEN) === '1';
+  } catch {
+    seen = false;
+  }
+  if (!seen) return '';
+
+  return `
+    <section class="restore">
+      <h2 class="restore__title">${esc(EMPTY_TITLE)}</h2>
+      <p class="restore__text">${esc(EMPTY_TEXT)}</p>
+      <button class="btn btn--primary" data-act="import">${esc(EMPTY_IMPORT)}</button>
+    </section>`;
+}
+
+async function refreshPersist() {
+  let value = false;
+  try {
+    if (navigator.storage?.persisted) value = await navigator.storage.persisted();
+  } catch {
+    value = false;
+  }
+  persisted = value;
+  const el = document.getElementById('persist-state');
+  if (el) el.textContent = value ? PERSIST_YES : PERSIST_NO;
+}
+
+async function applyImport(file) {
+  let text = '';
+  try {
+    text = await file.text();
+  } catch {
+    notice = IMPORT_ERR_JSON;
+    render();
+    return;
+  }
+
+  const parsed = parseImport(text);
+  if (!parsed.ok) {
+    notice =
+      {
+        json: IMPORT_ERR_JSON,
+        app: IMPORT_ERR_APP,
+        version: IMPORT_ERR_VERSION,
+        data: IMPORT_ERR_DATA,
+      }[parsed.error] || IMPORT_ERR_JSON;
+    // данные не тронуты: сохранять нечего
+    render();
+    return;
+  }
+
+  const merged = mergeData(data, parsed.data);
+  const { fresh, existed } = importCounts(data, merged);
+  data = merged;
+  save();
+  notice = IMPORT_RESULT.replace('{n}', String(fresh)).replace('{m}', String(existed));
+  render();
+}
+
+/**
+ * Копия файла: на телефоне — «Поделиться» (это и есть пересылка себе
+ * в избранное), иначе обычное скачивание. Имя — слаг и дата, без
+ * русских слов: файл может уехать в чужой чат.
+ */
+async function saveCopy() {
+  const payload = buildExport(data, SITE_VERSION);
+  const name = exportName(new Date());
+  const file = new File([JSON.stringify(payload, null, 2)], name, {
+    type: 'application/json',
+  });
+
+  if (navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file] });
+      notice = EXPORT_DONE;
+      render();
+      return;
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+      /* не вышло поделиться — ниже обычное скачивание */
+    }
+  }
+
+  try {
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    notice = EXPORT_DONE;
+  } catch {
+    notice = EXPORT_FAILED;
+  }
+  render();
 }
 
 /* ------------------------------------------------------------------ */
@@ -669,11 +1007,16 @@ const MOUNT = {
     startTimer(total);
   },
 
+  calm() {
+    startCalm(CALM_MINUTES * 60);
+  },
+
   write() {
     const ta = document.getElementById('letter');
     if (!ta) return;
     ta.addEventListener('input', () => {
       data.letter = ta.value;
+      data.letterTs = Date.now();
       save();
     });
     ta.focus();
@@ -685,6 +1028,10 @@ const MOUNT = {
     note.addEventListener('input', () => {
       draft.note = note.value;
     });
+  },
+
+  more() {
+    refreshPersist();
   },
 };
 
@@ -744,7 +1091,7 @@ function startBreath(id) {
             clearInterval(tick);
             tick = null;
             buzz(80);
-            go('done');
+            go('done', skillCtx);
             return;
           }
         }
@@ -805,7 +1152,37 @@ function startTimer(seconds) {
       clearInterval(tick);
       tick = null;
       buzz(90);
-      go('done');
+      go('done', skillCtx);
+      return;
+    }
+    draw();
+  }, 1000);
+}
+
+/**
+ * «Просто побыть»: только время. Ни шагов, ни вопросов, ни оценок —
+ * по истечении ничего не происходит, экран просто остаётся.
+ */
+function startCalm(seconds) {
+  const out = document.getElementById('c-num');
+  if (!out) return;
+  keepAwake();
+
+  let left = seconds;
+  const draw = () => {
+    const m = Math.floor(left / 60);
+    const s = left % 60;
+    out.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  };
+  draw();
+
+  tick = setInterval(() => {
+    left -= 1;
+    if (left <= 0) {
+      out.textContent = '00:00';
+      clearInterval(tick);
+      tick = null;
+      releaseWake();
       return;
     }
     draw();
@@ -816,7 +1193,7 @@ function startTimer(seconds) {
 /*  События                                                           */
 /* ------------------------------------------------------------------ */
 
-document.addEventListener('click', (e) => {
+document.addEventListener('click', async (e) => {
   const tabEl = e.target.closest('[data-tab]');
   if (tabEl) {
     switchTab(tabEl.dataset.tab);
@@ -833,6 +1210,9 @@ document.addEventListener('click', (e) => {
     case 'go':
       stepIdx = 0;
       if (el.dataset.screen !== 'card') cardEdit = false;
+      if (el.dataset.screen === 'home' || el.dataset.screen === 'triage') skillCtx = null;
+      // вошли в навык — после него спросим «помогло?» именно про него
+      if (el.dataset.screen === 'skill') skillCtx = id;
       go(el.dataset.screen, id);
       break;
 
@@ -842,7 +1222,7 @@ document.addEventListener('click', (e) => {
 
     case 'step-next': {
       const s = SKILLS[current.id];
-      if (stepIdx >= s.steps.length - 1) go('done');
+      if (stepIdx >= s.steps.length - 1) go('done', current.id);
       else {
         stepIdx += 1;
         render();
@@ -853,6 +1233,7 @@ document.addEventListener('click', (e) => {
     case 'start-skill': {
       const s = SKILLS[id];
       if (!s?.start) break;
+      skillCtx = id;
       if (s.start.type === 'breath') go('breath', s.start.id);
       else if (s.start.type === 'grounding') {
         stepIdx = 0;
@@ -863,7 +1244,7 @@ document.addEventListener('click', (e) => {
     }
 
     case 'ground-next':
-      if (stepIdx >= GROUNDING_STEPS.length - 1) go('done');
+      if (stepIdx >= GROUNDING_STEPS.length - 1) go('done', skillCtx);
       else {
         stepIdx += 1;
         render();
@@ -872,6 +1253,7 @@ document.addEventListener('click', (e) => {
 
     case 'breath-stop':
     case 'timer-stop':
+    case 'calm-exit':
       clearInterval(tick);
       tick = null;
       releaseWake();
@@ -879,14 +1261,42 @@ document.addEventListener('click', (e) => {
       break;
 
     case 'letter-done':
-      go('done');
+      go('done', skillCtx);
       break;
 
     case 'letter-clear':
       data.letter = '';
+      data.letterTs = Date.now();
       save();
       render();
       break;
+
+    /* -------------------------- сообщения ------------------------ */
+
+    case 'copy': {
+      const msg = MESSAGES.find((m) => m.id === id);
+      if (!msg) break;
+      const ok = await copyText(msg.text);
+      const state = el.querySelector('.msg__state');
+      if (state) {
+        state.textContent = ok ? MESSAGES_COPIED : MESSAGES_FAILED;
+        setTimeout(() => {
+          if (state.isConnected) state.textContent = '';
+        }, 2500);
+      }
+      break;
+    }
+
+    /* -------------------------- память о навыках ----------------- */
+
+    case 'help': {
+      data.help = bump(data.help, id, el.dataset.v, Date.now());
+      save();
+      skillCtx = null;
+      current = { name: 'done', id: null };
+      render();
+      break;
+    }
 
     /* -------------------------- карточка ------------------------- */
 
@@ -905,6 +1315,7 @@ document.addEventListener('click', (e) => {
         const el2 = document.getElementById('f-' + f.key);
         data.card[f.key] = el2 ? el2.value.trim() : '';
       }
+      data.cardTs = Date.now();
       save();
       cardEdit = false;
       render();
@@ -929,6 +1340,7 @@ document.addEventListener('click', (e) => {
         if (next[i]) next[i][inp.dataset.c] = inp.value.trim();
       });
       data.contacts = next.filter((c) => c.label || c.phone);
+      data.contactsTs = Date.now();
       save();
       contactsEdit = false;
       render();
@@ -968,8 +1380,10 @@ document.addEventListener('click', (e) => {
         }, 1600);
         break;
       }
+      const now = Date.now();
       data.entries.push({
-        t: Date.now(),
+        t: now,
+        ts: now,
         mood: draft.mood,
         tags: [...draft.tags],
         note: draft.note.trim(),
@@ -984,18 +1398,32 @@ document.addEventListener('click', (e) => {
 
     case 'erase':
       if (confirm('Стереть все записи, карточку и контакты? Это нельзя отменить.')) {
-        localStorage.removeItem(KEY);
+        try {
+          localStorage.removeItem(KEY);
+          // отметку «пользовались» тоже: иначе после честной очистки
+          // приложение решит, что данные пропали
+          localStorage.removeItem(SEEN);
+        } catch {
+          /* приватный режим */
+        }
+        await clearData();
         location.reload();
       }
       break;
 
-    case 'export': {
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `opora-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    case 'export':
+      await saveCopy();
+      break;
+
+    case 'import': {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json,.json';
+      input.addEventListener('change', () => {
+        const file = input.files?.[0];
+        if (file) applyImport(file);
+      });
+      input.click();
       break;
     }
 
@@ -1057,6 +1485,10 @@ async function promptInstall() {
 /* ------------------------------------------------------------------ */
 
 render();
+
+// вторая копия: читаем IndexedDB и сливаем уже после первого экрана,
+// чтобы приложение открывалось мгновенно
+hydrate();
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
