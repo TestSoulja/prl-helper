@@ -187,23 +187,32 @@ export function buildExport(raw, version, date = new Date()) {
 /* ------------------------------------------------------------------ */
 export const COPY_SHARE = 'share';
 export const COPY_DOWNLOAD = 'download';
-export const COPY_UNAVAILABLE = 'unavailable';
+export const COPY_NO_SHARE = 'no-share';
+export const COPY_CANT_SHARE = 'cant-share';
 
 /**
- * Ветка выбирается по устройству, а не по факту успеха: на телефоне
- * цель — переслать, на десктопе — скачать. Если тач есть, а делиться
- * браузер не умеет, это честный отказ с одной явной кнопкой-фолбэком,
- * а не тихое скачивание.
+ * Ветка выбирается по устройству и по canShare, а не по факту успеха.
+ *
+ * - телефон + canShare({files}) сказал да → «Поделиться»;
+ * - телефон без navigator.share → «не умеет делиться» (не «не получилось»);
+ * - телефон, где canShare вернул false → «делится, но не файлами»:
+ *   это другое, чем сбой попытки, и попытку делать не надо;
+ * - canShare нет вовсе (старый движок) → пробуем: другого способа узнать нет;
+ * - компьютер → скачивание.
+ *
+ * canShare === null значит «метода нет / проверить не дал», а не «нет».
  */
-export function copyTarget({ touch = false, hasShare = false } = {}) {
+export function copyTarget({ touch = false, hasShare = false, canShare = null } = {}) {
   if (!touch) return COPY_DOWNLOAD;
-  return hasShare ? COPY_SHARE : COPY_UNAVAILABLE;
+  if (!hasShare) return COPY_NO_SHARE;
+  if (canShare === false) return COPY_CANT_SHARE;
+  return COPY_SHARE;
 }
 
 /**
  * Чем кончилась попытка «Поделиться»: 'done' — ушло, 'silent' — человек
  * сам закрыл лист (это нормально, экран не трогаем), 'failed' — ошибка,
- * о ней надо сказать и дать кнопку «сохранить файл».
+ * о ней надо сказать и дать фолбэки («Скопировать текст копии», «скачать файл»).
  */
 export function shareOutcome(error) {
   if (!error) return 'done';

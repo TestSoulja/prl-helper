@@ -331,23 +331,33 @@ export const CALM_MINUTES = 5;
 
 // Подпись зависит от ветки: на телефоне цель — переслать, а не сохранить.
 export const EXPORT_SHARE_BUTTON = 'Переслать копию';
-export const EXPORT_DOWNLOAD_BUTTON = 'Сохранить файл';
+export const EXPORT_DOWNLOAD_BUTTON = 'Скачать файл';
 export const EXPORT_NOTE_SHARE =
   'Копия уйдёт в мессенджер — то есть покинет телефон.';
 export const EXPORT_NOTE =
   'Копия уходит в мессенджер или в файлы — то есть покидает телефон.';
 export const EXPORT_SHARE_DONE = 'копия передана в «Поделиться»';
 export const EXPORT_SHARE_FAILED = 'не получилось переслать';
+// «Не умеет» — это не сбой: попытки не было, и текст другой.
 export const EXPORT_SHARE_UNAVAILABLE =
-  'не получилось переслать: браузер не умеет делиться файлами';
-// Единственный путь после неудачи share: явная мелкая кнопка.
-export const EXPORT_FALLBACK_BUTTON = 'сохранить файл';
+  'делиться этот браузер не умеет — ниже есть текст копии';
+export const EXPORT_SHARE_CANT =
+  'файлы этот браузер не передаёт — ниже есть текст копии';
+// Фолбэки: текст копии работает всегда, скачивание — не везде.
+export const EXPORT_COPY_BUTTON = 'Скопировать текст копии';
+export const EXPORT_COPY_DONE = 'текст копии в буфере — вставь в переписку';
+export const EXPORT_COPY_FAILED = 'не получилось скопировать текст';
+export const EXPORT_FALLBACK_BUTTON = 'скачать файл';
 export const EXPORT_FALLBACK_NOTE =
-  'Файл останется на телефоне — пересылать его придётся самой.';
-export const EXPORT_DONE = 'копия сохранена';
-export const EXPORT_FAILED = 'не получилось сохранить файл';
-// Строка диагностики: только при ?debug=1, чтобы понять чужой телефон.
+  'Если файл не уходит — скопируй текст копии: он вставится в любую переписку.';
+// Скачивание не подтверждено: файл лишь отдан браузеру, и в standalone
+// на iOS он может никуда не деться — поэтому «отдан», а не «сохранён».
+export const EXPORT_DONE = 'файл отдан браузеру';
+export const EXPORT_FAILED = 'не получилось скачать файл';
+// Строка диагностики: включается пятью тапами по версии в «О приложении».
 export const EXPORT_DEBUG = 'диагностика';
+export const DEBUG_ON = 'диагностика включена';
+export const DEBUG_OFF = 'диагностика выключена';
 
 export const IMPORT_BUTTON = 'Восстановить из файла';
 export const IMPORT_RESULT = 'принято {n}, уже было {m}';

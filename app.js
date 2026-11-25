@@ -30,11 +30,17 @@ import {
   EXPORT_SHARE_DONE,
   EXPORT_SHARE_FAILED,
   EXPORT_SHARE_UNAVAILABLE,
+  EXPORT_SHARE_CANT,
+  EXPORT_COPY_BUTTON,
+  EXPORT_COPY_DONE,
+  EXPORT_COPY_FAILED,
   EXPORT_FALLBACK_BUTTON,
   EXPORT_FALLBACK_NOTE,
   EXPORT_DONE,
   EXPORT_FAILED,
   EXPORT_DEBUG,
+  DEBUG_ON,
+  DEBUG_OFF,
   IMPORT_BUTTON,
   IMPORT_RESULT,
   IMPORT_ERR_JSON,
@@ -63,9 +69,11 @@ import {
   shareOutcome,
   refreshDefaultContacts,
   COPY_SHARE,
-  COPY_UNAVAILABLE,
+  COPY_NO_SHARE,
+  COPY_CANT_SHARE,
 } from './store.js';
 import { readData, writeData, clearData } from './db.js';
+import { TAB_OF, transition, goBack, stateOf } from './nav.js';
 
 /* ------------------------------------------------------------------ */
 /*  Состояние                                                          */
@@ -79,6 +87,9 @@ const KEY = 'opora.v1';
 // отметка «приложением уже пользовались»: нужна, чтобы отличить
 // «данные вычищены» от «первый запуск»
 const SEEN = 'opora.seen';
+// флаг диагностики: в установленном приложении адресной строки нет,
+// поэтому ?debug=1 там недоступен — переключаем пятью тапами по версии
+const DEBUG = 'opora.debug';
 
 const defaults = () => ({
   ...normalize(null),
@@ -212,7 +223,8 @@ async function hydrate() {
 }
 
 let current = { name: 'home', id: null };
-let history = [];
+// внутренний стек возврата; в историю браузера пишет только go()
+let nav = [];
 let activeTab = 'home';
 let stepIdx = 0;
 let cardEdit = false;
@@ -227,12 +239,17 @@ let skillCtx = null;
 let notice = '';
 // защищено ли хранилище от очистки: null — ещё не узнали
 let persisted = null;
-// «Поделиться» не сработало: нужна отдельная кнопка «сохранить файл»
+// «Поделиться» не сработало: нужны фолбэки — текст копии и скачивание
 let needFallback = false;
-// имя ошибки share для строки ?debug=1
+// имя и текст ошибки share: их видно в строке диагностики
 let shareError = '';
-
-const TAB_OF = { home: 'home', breath: 'breath', card: 'card', diary: 'diary' };
+let shareMessage = '';
+// пять тапов по версии в «О приложении»: включить или выключить диагностику
+let versionTaps = 0;
+let versionTapTimer = null;
+// до какого времени идёт «побыть», если с экрана ушли: срок, а не счётчик,
+// поэтому возвращение показывает оставшееся время, а не начинает заново
+let calmUntil = 0;
 
 const view = document.getElementById('view');
 const tabbar = document.getElementById('tabbar');
@@ -299,28 +316,75 @@ async function copyText(text) {
 /*  Навигация                                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Переход на экран.
+ *
+ * Системная история — источник правды для жеста «назад»: экран внутри
+ * добавляет запись, вкладка заменяет текущую, повторный тап по тому же
+ * экрану не кладёт ничего. URL не меняется: приложение остаётся одной
+ * страницей, поэтому переходы не перезагружают её.
+ */
 function go(name, id = null) {
-  history.push({ ...current });
-  current = { name, id };
+  const step = transition(current, nav, { name, id });
+
+  if (step.mode === 'none') {
+    render();
+    return;
+  }
+
+  const state = stateOf(step.current);
+  if (step.mode === 'push') window.history.pushState(state, '');
+  else if (nav.length) {
+    // Возврат на вкладку из глубины: не заменяем запись, а проходим назад
+    // по своим же записям. Если просто заменить текущую, за спиной останутся
+    // записи пройденных экранов и первый жест «назад» на вкладке ничего
+    // не сделает — ровно та ловушка, от которой уходим.
+    window.history.go(-nav.length);
+  } else window.history.replaceState(state, '');
+
+  current = step.current;
+  nav = step.stack;
   notice = '';
   render();
 }
 
+/**
+ * Шаг назад. Идём системной историей, а не только своим стеком: иначе
+ * записи браузера и экран разъедутся и жест «назад» начнёт открывать
+ * то, чего на экране уже нет. Экран перерисует popstate.
+ * Возвращаться некуда — не трогаем систему: на первом экране жест
+ * закрывает приложение, и это правильно.
+ */
 function back() {
-  current = history.pop() || { name: activeTab, id: null };
-  notice = '';
-  render();
+  if (!nav.length) return;
+  window.history.back();
 }
 
+/** Вкладка: заменяет запись истории, стек возврата очищается. */
 function switchTab(name) {
-  history = [];
-  current = { name, id: null };
   cardEdit = false;
   contactsEdit = false;
   skillCtx = null;
+  stepIdx = 0;
+  go(name);
+}
+
+/**
+ * Системный «назад»: свайп от края в Safari, жест и кнопка на Android,
+ * Alt+← на компьютере. Внутренний стек пуст — мы на первом экране,
+ * не вмешиваемся: пусть система закрывает приложение.
+ */
+window.addEventListener('popstate', () => {
+  const step = goBack(current, nav);
+  if (!step.moved) return;
+
+  current = step.current;
+  nav = step.stack;
+  cardEdit = false;
+  contactsEdit = false;
   notice = '';
   render();
-}
+});
 
 /* ------------------------------------------------------------------ */
 /*  Рендер                                                            */
@@ -860,15 +924,18 @@ const SCREENS = {
         </p>
         <p class="muted small">
           Если телефон потеряется или данные браузера сотрут полностью — записи исчезнут.
-          Поэтому есть кнопка «Сохранить копию»: файл уходит в мессенджер или в файлы.
+          Поэтому есть копия: на телефоне кнопка пересылает файл в мессенджер,
+          на компьютере — скачивает. Если файл не уходит, текст копии можно
+          скопировать и вставить в переписку.
         </p>
         <div class="note">
           ${esc(SAFETY_NOTE)}
           Если есть угроза для жизни — это не к приложению, это в скорую.
         </div>
-        <div class="safety">
+        <div class="safety version" data-act="about-version">
           Версия ${esc(SITE_VERSION)} · работает офлайн
         </div>
+        ${debugBlock()}
       </div>`;
   },
 };
@@ -1030,15 +1097,29 @@ function isTouchDevice() {
   }
 }
 
+/**
+ * canShare({ files }) для настоящего файла копии: true / false,
+ * либо null — метода нет или он упал на проверке.
+ */
+function canShareFiles(file = makeCopyFile().file) {
+  try {
+    if (typeof navigator.canShare !== 'function') return null;
+    return navigator.canShare({ files: [file] }) === true;
+  } catch {
+    return null;
+  }
+}
+
 function currentCopyTarget() {
   return copyTarget({
     touch: isTouchDevice(),
     hasShare: typeof navigator.share === 'function',
+    canShare: canShareFiles(),
   });
 }
 
 // Подпись — по устройству: на телефоне кнопка зовёт переслать, даже если
-// браузер этого не умеет. Тогда нажатие честно объяснит и даст фолбэк,
+// браузер этого не умеет. Тогда нажатие честно объяснит и даст фолбэки,
 // а не пообещает «сохранить» и не сохранит.
 function copyLabel() {
   return isTouchDevice() ? EXPORT_SHARE_BUTTON : EXPORT_DOWNLOAD_BUTTON;
@@ -1048,8 +1129,21 @@ function copyNote() {
   return isTouchDevice() ? EXPORT_NOTE_SHARE : EXPORT_NOTE;
 }
 
-/* Диагностика: без неё причину на чужом телефоне не узнать. */
+/* ------------------------------------------------------------------ */
+/*  Диагностика: без неё причину на чужом телефоне не узнать           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * В установленном приложении адресной строки нет, поэтому ?debug=1
+ * недоступен. Флаг живёт в localStorage и переключается пятью тапами
+ * по строке версии в «О приложении»; параметр в адресе тоже работает.
+ */
 function debugEnabled() {
+  try {
+    if (localStorage.getItem(DEBUG) === '1') return true;
+  } catch {
+    /* приватный режим: остаётся адресный параметр */
+  }
   try {
     return new URLSearchParams(location.search).get('debug') === '1';
   } catch {
@@ -1057,31 +1151,70 @@ function debugEnabled() {
   }
 }
 
-function canShareProbe() {
+function toggleDebug() {
+  const next = !debugEnabled();
   try {
-    if (typeof navigator.canShare !== 'function') return 'нет метода';
-    return navigator.canShare({ files: [makeCopyFile().file] }) ? 'true' : 'false';
+    if (next) localStorage.setItem(DEBUG, '1');
+    else localStorage.removeItem(DEBUG);
   } catch {
-    return 'ошибка';
+    /* не записалось — включится до перезагрузки */
+  }
+  notice = next ? DEBUG_ON : DEBUG_OFF;
+  return next;
+}
+
+/** Файлы трёх типов: видно, что именно отвергает браузер телефона. */
+function probeFiles() {
+  const payload = JSON.stringify(buildExport(data, SITE_VERSION), null, 2);
+  const name = exportName(new Date());
+  return [
+    ['application/json', new File([payload], name, { type: 'application/json' })],
+    ['text/plain', new File([payload], name.replace(/\.json$/, '.txt'), { type: 'text/plain' })],
+    [
+      'application/octet-stream',
+      new File([payload], name, { type: 'application/octet-stream' }),
+    ],
+  ];
+}
+
+function canShareProbe(file) {
+  if (typeof navigator.canShare !== 'function') return 'метода нет';
+  try {
+    return navigator.canShare({ files: [file] }) ? 'true' : 'false';
+  } catch (e) {
+    return `ошибка ${e?.name || '?'}`;
   }
 }
 
+/**
+ * Строка диагностики — построчно, без догадок: что есть в браузере,
+ * что он отвечает про каждый тип файла и чем кончилась последняя попытка.
+ */
 function debugBlock() {
   if (!debugEnabled()) return '';
-  const row = [
+  const lines = [
     `share: ${typeof navigator.share}`,
-    `canShare(files): ${canShareProbe()}`,
+    `canShare: ${typeof navigator.canShare}`,
+    ...probeFiles().map(([type, file]) => `canShare(${type}): ${canShareProbe(file)}`),
     `maxTouchPoints: ${navigator.maxTouchPoints ?? '?'}`,
     `ветка: ${currentCopyTarget()}`,
     `ошибка: ${shareError || '—'}`,
   ];
-  return `<p class="debug">${esc(EXPORT_DEBUG)}: ${esc(row.join(' · '))}</p>`;
+  if (shareMessage) lines.push(`сообщение: ${shareMessage}`);
+  return `
+    <div class="debug">
+      <div>${esc(EXPORT_DEBUG)}</div>
+      ${lines.map((l) => `<div>${esc(l)}</div>`).join('')}
+    </div>`;
 }
 
-/* Явный фолбэк после неудачи share — единственный путь к файлу. */
+/** Фолбэки после неудачи: сначала то, что работает всегда, потом файл. */
 function fallbackBlock() {
   if (!needFallback) return '';
   return `
+    <button class="btn btn--small" data-act="export-copy-text">
+      ${esc(EXPORT_COPY_BUTTON)}
+    </button>
     <button class="btn btn--ghost btn--small" data-act="export-download">
       ${esc(EXPORT_FALLBACK_BUTTON)}
     </button>
@@ -1090,20 +1223,34 @@ function fallbackBlock() {
 
 async function shareCopy() {
   const { file } = makeCopyFile();
+  shareError = '';
+  shareMessage = '';
   try {
     await navigator.share({ files: [file] });
   } catch (e) {
     // человек сам закрыл лист — это нормально, экран не трогаем
     if (shareOutcome(e) === 'silent') return;
     shareError = e?.name || 'без имени';
+    shareMessage = e?.message || '';
     needFallback = true;
     notice = EXPORT_SHARE_FAILED;
     render();
     return;
   }
-  shareError = '';
   needFallback = false;
   notice = EXPORT_SHARE_DONE;
+  render();
+}
+
+/** Текст копии в буфер: работает и там, где файл не уходит и скачивание молчит. */
+async function copyExportText() {
+  try {
+    const payload = buildExport(data, SITE_VERSION);
+    const ok = await copyText(JSON.stringify(payload, null, 2));
+    notice = ok ? EXPORT_COPY_DONE : EXPORT_COPY_FAILED;
+  } catch {
+    notice = EXPORT_COPY_FAILED;
+  }
   render();
 }
 
@@ -1126,14 +1273,29 @@ function downloadCopy() {
 
 async function saveCopy() {
   const target = currentCopyTarget();
+  shareError = '';
+  shareMessage = '';
+
   if (target === COPY_SHARE) return shareCopy();
-  if (target === COPY_UNAVAILABLE) {
-    shareError = 'нет метода share';
+
+  // «Не умеет» — не сбой: попытки не было, поэтому и текст другой.
+  // Сразу фолбэки, без броска в пустоту.
+  if (target === COPY_NO_SHARE) {
+    shareError = 'navigator.share отсутствует';
     needFallback = true;
     notice = EXPORT_SHARE_UNAVAILABLE;
     render();
     return;
   }
+
+  if (target === COPY_CANT_SHARE) {
+    shareError = 'canShare({files}) === false';
+    needFallback = true;
+    notice = EXPORT_SHARE_CANT;
+    render();
+    return;
+  }
+
   downloadCopy();
 }
 
@@ -1308,30 +1470,37 @@ function startTimer(seconds) {
 /**
  * «Просто побыть»: только время. Ни шагов, ни вопросов, ни оценок —
  * по истечении ничего не происходит, экран просто остаётся.
+ *
+ * Время считается по сроку `calmUntil`, а не по тикающему счётчику:
+ * уход с экрана (в том числе системным «назад») не обнуляет его молча —
+ * вернувшись, человек видит оставшееся время. Ни звука, ни уведомления
+ * в конце нет: это не будильник и не обязательство.
  */
 function startCalm(seconds) {
   const out = document.getElementById('c-num');
   if (!out) return;
+
+  const now = Date.now();
+  if (calmUntil <= now) calmUntil = now + seconds * 1000;
   keepAwake();
 
-  let left = seconds;
-  const draw = () => {
-    const m = Math.floor(left / 60);
-    const s = left % 60;
-    out.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  const left = () => Math.max(0, Math.ceil((calmUntil - Date.now()) / 1000));
+
+  const draw = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    out.textContent = `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   };
-  draw();
+  draw(left());
 
   tick = setInterval(() => {
-    left -= 1;
-    if (left <= 0) {
-      out.textContent = '00:00';
+    const s = left();
+    draw(s);
+    if (s <= 0) {
       clearInterval(tick);
       tick = null;
       releaseWake();
-      return;
     }
-    draw();
   }, 1000);
 }
 
@@ -1549,6 +1718,8 @@ document.addEventListener('click', async (e) => {
           // отметку «пользовались» тоже: иначе после честной очистки
           // приложение решит, что данные пропали
           localStorage.removeItem(SEEN);
+          // и диагностику: после «стереть всё» она не должна оставаться
+          localStorage.removeItem(DEBUG);
         } catch {
           /* приватный режим */
         }
@@ -1564,6 +1735,26 @@ document.addEventListener('click', async (e) => {
     case 'export-download':
       downloadCopy();
       break;
+
+    case 'export-copy-text':
+      await copyExportText();
+      break;
+
+    // пять тапов по строке версии в «О приложении»: диагностика без адреса
+    case 'about-version': {
+      versionTaps += 1;
+      clearTimeout(versionTapTimer);
+      versionTapTimer = setTimeout(() => {
+        versionTaps = 0;
+      }, 1500);
+      if (versionTaps >= 5) {
+        versionTaps = 0;
+        clearTimeout(versionTapTimer);
+        toggleDebug();
+        render();
+      }
+      break;
+    }
 
     case 'import': {
       const input = document.createElement('input');
@@ -1633,6 +1824,10 @@ async function promptInstall() {
 /* ------------------------------------------------------------------ */
 /*  Старт                                                             */
 /* ------------------------------------------------------------------ */
+
+// Первый экран заменяет запись, а не добавляет новую: иначе первый жест
+// «назад» возвращал бы на тот же экран и приложение не закрывалось бы.
+window.history.replaceState(stateOf(current), '');
 
 render();
 

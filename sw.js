@@ -1,5 +1,5 @@
 /* Офлайн-кэш. Меняй VERSION при обновлении файлов. */
-const VERSION = 'opora-v0.3.1';
+const VERSION = 'opora-v0.4.0';
 
 const SHELL = [
   './',
@@ -10,6 +10,7 @@ const SHELL = [
   './store.js',
   './db.js',
   './rank.js',
+  './nav.js',
   './manifest.webmanifest',
   './icons/favicon.svg',
   './icons/icon-192.png',

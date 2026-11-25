@@ -1071,7 +1071,7 @@ input::placeholder {
   color: var(--accent);
 }
 
-/* ?debug=1: причина, почему share не сработал, на чужом телефоне. */
+/* Диагностика: включается пятью тапами по строке версии (или ?debug=1) */
 .debug {
   margin: 10px 0 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1079,6 +1079,19 @@ input::placeholder {
   line-height: 1.4;
   color: var(--muted);
   word-break: break-word;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Мелочи интерфейса: строка версии и диагностика                     */
+/* ------------------------------------------------------------------ */
+
+/* Строка версии — обычный текст, не кнопка: её нет в обходе по Tab и в дереве
+   доступности (иначе VoiceOver читает «…, кнопка»). Пять тапов по ней —
+   служебный жест, а не действие для человека; он работает и на div. */
+.safety.version {
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .restore {
