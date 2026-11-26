@@ -547,6 +547,24 @@ export function shellOf(ua = '', standalone = false) {
 }
 
 /**
+ * Браузер из userAgent, а не догадка по ошибке. Нужен, чтобы в следующий раз
+ * отличить наш дефект от отказа движка: «NotAllowedError» у Chrome и у Safari
+ * означает разное, а по одному имени ошибки этого не видно.
+ * Порядок проверок важен: Edge и Opera тоже пишут Chrome в userAgent, а
+ * CriOS/FxiOS — это Chrome и Firefox на iOS.
+ */
+export function engineOf(ua = '') {
+  const s = String(ua);
+  if (/Edg(e|A|iOS)?\//i.test(s)) return 'Edge';
+  if (/OPR\/|Opera/i.test(s)) return 'Opera';
+  if (/SamsungBrowser/i.test(s)) return 'Samsung Internet';
+  if (/Firefox\/|FxiOS\//i.test(s)) return 'Firefox';
+  if (/CriOS\/|Chrome\/|Chromium\//i.test(s)) return 'Chrome';
+  if (/Safari\//i.test(s)) return 'Safari';
+  return 'неизвестный';
+}
+
+/**
  * Разбор файла копии. Возвращает { ok: true, data, schema, notes }
  * либо { ok: false, error, schema? } с причиной. Ничего не пишет.
  *

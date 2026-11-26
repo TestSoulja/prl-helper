@@ -77,6 +77,7 @@ import {
   EXPORT_SHARE_UNAVAILABLE,
   EXPORT_SHARE_CANT,
   EXPORT_SHARE_REFUSED,
+  EXPORT_SEND_BROKEN,
   EXPORT_COPY_BUTTON,
   EXPORT_COPY_DONE,
   EXPORT_COPY_FAILED,
@@ -126,6 +127,7 @@ import {
   exportName,
   shareOutcome,
   shellOf,
+  engineOf,
   refreshDefaultContacts,
   readStored,
   quarantineKey,
@@ -393,6 +395,13 @@ let pasteText = '';
 // имя и текст ошибки share: их видно в строке диагностики
 let shareError = '';
 let shareMessage = '';
+// сработала ли активация в момент вызова share: снимается до вызова, а не
+// после, иначе «NotAllowedError» снова был бы без объяснения
+let shareActivation = '';
+// отказ окна уже был в этой сессии: главный путь — текст копии, «Отправить»
+// остаётся вторичной. Снимается успехом и перезагрузкой: это состояние
+// экрана, а не приговор браузеру навсегда
+let shareRefused = false;
 // пять тапов по версии в «О приложении»: включить или выключить диагностику
 let versionTaps = 0;
 let versionTapTimer = null;
@@ -1441,6 +1450,15 @@ const SCREENS = {
     // «Отправить» — только там, где системный лист есть: кнопка, которая
     // заведомо ответит «не умеет», — тупик. Два других пути есть всегда.
     const canSend = typeof navigator.share === 'function';
+    // Отказ окна уже был в этой сессии: sendCopy() поставил shareRefused.
+    // Тогда главный путь — текст копии, а «Отправить» остаётся вторичной
+    // с пометкой: прятать её значило бы делать вид, что пути нет.
+    const sendBroken = shareRefused && canSend;
+    const download = `<button class="btn ${
+      !canSend && !sendBroken ? 'btn--primary' : ''
+    }" data-act="export-download">${esc(EXPORT_DOWNLOAD_BUTTON)}</button>`;
+    const copyPrimary = `<button class="btn btn--primary" data-act="export-copy-text">${esc(EXPORT_COPY_BUTTON)}</button>`;
+    const copySmall = `<button class="btn btn--ghost btn--small" data-act="export-copy-text">${esc(EXPORT_COPY_BUTTON)}</button>`;
     return `
       <div class="screen">
         <button class="back" data-act="back">‹ назад</button>
@@ -1455,14 +1473,19 @@ const SCREENS = {
         <section class="copy">
           <h2 class="copy__title">Копия</h2>
           ${
-            canSend
-              ? `<button class="btn btn--primary" data-act="export-send">${esc(EXPORT_SEND_BUTTON)}</button>`
-              : ''
+            sendBroken
+              ? `${copyPrimary}
+                 ${canSend ? `<button class="btn" data-act="export-send">${esc(EXPORT_SEND_BUTTON)}</button>` : ''}
+                 <p class="hint">${esc(EXPORT_SEND_BROKEN)}</p>
+                 ${download}`
+              : `${
+                  canSend
+                    ? `<button class="btn btn--primary" data-act="export-send">${esc(EXPORT_SEND_BUTTON)}</button>`
+                    : ''
+                }
+                 ${download}
+                 ${copySmall}`
           }
-          <button class="btn ${canSend ? '' : 'btn--primary'}" data-act="export-download">${esc(EXPORT_DOWNLOAD_BUTTON)}</button>
-          <button class="btn btn--ghost btn--small" data-act="export-copy-text">
-            ${esc(EXPORT_COPY_BUTTON)}
-          </button>
           <p class="hint">${esc(COPY_NOTE)}</p>
         </section>
 
@@ -1886,6 +1909,8 @@ function debugBlock() {
   const probes = probeFiles();
   const lines = [
     `оболочка: ${shellOf(navigator.userAgent, isStandalone)}`,
+    `движок: ${engineOf(navigator.userAgent)}`,
+    `активация: ${shareActivation || '—'}`,
     `share: ${typeof navigator.share}`,
     `canShare: ${typeof navigator.canShare}`,
     ...probes.map(([type, file]) => `canShare(${type}): ${canShareProbe(file)}`),
@@ -1906,13 +1931,24 @@ function debugBlock() {
  */
 
 /**
- * Текст отказа по разрешению. Выход называем прямо: в WebView мессенджера
- * файл не уйдёт никогда, а текст копии уходит откуда угодно. Обещания про
- * иконку на главном экране здесь нет: оно не измерено ни на Android, ни на
- * iOS, а на iOS в standalone файл в лист не отдаётся вовсе.
+ * Текст отказа. Совета «открой сайт в Chrome или Safari» здесь больше нет:
+ * человек уже в браузере, а на iOS у иконки на главном экране своё хранилище,
+ * и в Safari он увидел бы пустой дневник. Поэтому названы два выхода,
+ * которые работают всегда: текст копии и файл из «Файлов».
  */
 function shareRefusedNotice() {
   return EXPORT_SHARE_REFUSED;
+}
+
+/**
+ * Была ли активация в момент вызова share. Снимается до вызова: после
+ * отказа браузер уже погасил её, и строка говорила бы не о том.
+ * `navigator.userActivation` есть не везде — тогда так и пишем.
+ */
+function activationNow() {
+  const ua = navigator.userActivation;
+  if (!ua) return 'нет API';
+  return ua.isActive ? 'да' : 'нет';
 }
 
 /**
@@ -1921,7 +1957,8 @@ function shareRefusedNotice() {
  * «браузер не умеет» — не сбой, и текст у него другой.
  *
  * После падения исходы разные (store.js, shareOutcome):
- *   refused — повтор бессмысленен, тип файла ни при чём: говорим выход;
+ *   refused — повтор бессмысленен, тип файла ни при чём: говорим выход,
+ *             а на сессию главным путём становится текст копии;
  *   retry   — старый движок не знает json: одна попытка с text/plain;
  *   silent  — лист закрыли сами: экран не трогаем;
  *   failed  — остальное: честный «не получилось» и два фолбэка.
@@ -1931,6 +1968,7 @@ async function sendCopy() {
   const json = copyFile(text, COPY_TYPES[0]);
   shareError = '';
   shareMessage = '';
+  shareActivation = '';
 
   if (typeof navigator.share !== 'function') {
     shareError = 'navigator.share отсутствует';
@@ -1946,12 +1984,14 @@ async function sendCopy() {
   }
 
   try {
+    shareActivation = activationNow();
     await navigator.share({ files: [json] });
   } catch (e) {
     const outcome = shareOutcome(e);
     if (outcome === 'silent') return;
     shareError = e?.name || 'без имени';
     shareMessage = e?.message || '';
+    if (outcome === 'refused') shareRefused = true;
     if (outcome !== 'retry') {
       notice = outcome === 'refused' ? shareRefusedNotice() : EXPORT_SHARE_FAILED;
       render();
@@ -1960,18 +2000,24 @@ async function sendCopy() {
     // Один повтор с text/plain: то же содержимое, имя .txt. Дальше не идём —
     // третий раз падало бы так же.
     try {
+      shareActivation = activationNow();
       await navigator.share({ files: [copyFile(text, 'text/plain')] });
     } catch (e2) {
-      if (shareOutcome(e2) === 'silent') return;
+      const outcome2 = shareOutcome(e2);
+      if (outcome2 === 'silent') return;
       shareError = e2?.name || 'без имени';
       shareMessage = e2?.message || '';
       // Второй отказ по типу — это по-прежнему «окно не даёт»; но если
       // движок упал по другой причине, честнее общий текст, а не диагноз.
-      notice = shareOutcome(e2) === 'failed' ? EXPORT_SHARE_FAILED : shareRefusedNotice();
+      if (outcome2 !== 'failed') shareRefused = true;
+      notice = outcome2 === 'failed' ? EXPORT_SHARE_FAILED : shareRefusedNotice();
       render();
       return;
     }
   }
+  // Успех снимает пометку отказа: иначе экран говорит «передано»
+  // и одновременно «не работает».
+  shareRefused = false;
   notice = EXPORT_SHARE_DONE;
   render();
 }
