@@ -2,11 +2,25 @@ import {
   BREATHS,
   SKILLS,
   TRIAGE,
+  PANIC_NOTE,
+  URGE_SELF_TITLE,
+  URGE_SELF_LINES,
   CRISIS_FIELDS,
+  PLAN_EYEBROW,
+  PLAN_LEAD,
+  PLAN_BUTTON,
+  PLAN_NEXT,
+  PLAN_DONE,
+  CARD_FIRST_TITLE,
+  CARD_RISK_LINE,
+  CARD_AWAY_TITLE,
+  CARD_AWAY_HINT,
+  CARD_AWAY_PLACEHOLDER,
   AFTER_MEDS_CARD,
   AFTER_MEDS_CONTACTS,
   MEDS_TITLE,
   MEDS_LEAD,
+  MEDS_EXPECT,
   MEDS_LINK,
   MEDS_EMPTY,
   MEDS_ADD,
@@ -40,6 +54,16 @@ import {
   LEGACY_CONTACTS,
   KIDS_TITLE,
   KIDS_CONTACTS,
+  NO_ONE_TITLE,
+  NO_ONE_TEXT,
+  NO_ONE_PHONES,
+  NO_ONE_LETTER,
+  FIRST_STEP_TITLE,
+  FIRST_STEP_LEAD,
+  FIRST_STEP_SAY,
+  FIRST_STEP_TAKE_TITLE,
+  FIRST_STEP_TAKE,
+  FIRST_STEP_NOTE,
   MOOD_WORDS,
   MOOD_TAGS,
   SAFETY_NOTE,
@@ -70,14 +94,7 @@ import {
   CALM_LINE,
   CALM_EXIT,
   CALM_MINUTES,
-  EXPORT_SEND_BUTTON,
   EXPORT_DOWNLOAD_BUTTON,
-  EXPORT_SHARE_DONE,
-  EXPORT_SHARE_FAILED,
-  EXPORT_SHARE_UNAVAILABLE,
-  EXPORT_SHARE_CANT,
-  EXPORT_SHARE_REFUSED,
-  EXPORT_SEND_BROKEN,
   EXPORT_COPY_BUTTON,
   EXPORT_COPY_DONE,
   EXPORT_COPY_FAILED,
@@ -113,6 +130,13 @@ import {
   PERSIST_YES,
   PERSIST_NO,
   PERSIST_NOTE,
+  SLEEP_HISTORY_TITLE,
+  SLEEP_HISTORY_HINT,
+  COPY_SCOPE_LABEL,
+  COPY_SCOPE_ALL,
+  COPY_SCOPE_RECENT,
+  COPY_NOTE_RECENT,
+  EXPORT_COPY_DONE_RECENT,
 } from './content.js';
 
 import { rankSkills, bump } from './rank.js';
@@ -125,7 +149,6 @@ import {
   parseImport,
   importCounts,
   exportName,
-  shareOutcome,
   shellOf,
   engineOf,
   refreshDefaultContacts,
@@ -162,7 +185,10 @@ import {
   toggleMed,
   markableMeds,
   sleepText,
+  sleepLines,
 } from './meds.js';
+import { planSteps, firstPerson, awayText } from './card.js';
+import { featureOn } from './features.js';
 
 /* ------------------------------------------------------------------ */
 /*  Состояние                                                          */
@@ -365,6 +391,9 @@ let syncState = null;
 let pendingTarget = null;
 let activeTab = 'home';
 let stepIdx = 0;
+// шаг «Пройти план»: живёт только в памяти экрана. Прогресс не сохраняется —
+// иначе пройденный план стал бы заданием, которое можно «провалить».
+let planStep = 0;
 let cardEdit = false;
 let contactsEdit = false;
 // форма препарата: null — закрыта, 'new' — добавление, иначе id препарата
@@ -392,16 +421,9 @@ let persisted = null;
 // восстановление текстом: поле вставки и текст в нём
 let pasteOpen = false;
 let pasteText = '';
-// имя и текст ошибки share: их видно в строке диагностики
-let shareError = '';
-let shareMessage = '';
-// сработала ли активация в момент вызова share: снимается до вызова, а не
-// после, иначе «NotAllowedError» снова был бы без объяснения
-let shareActivation = '';
-// отказ окна уже был в этой сессии: главный путь — текст копии, «Отправить»
-// остаётся вторичной. Снимается успехом и перезагрузкой: это состояние
-// экрана, а не приговор браузеру навсегда
-let shareRefused = false;
+// что положить в копию: 'all' — всё, 'recent' — только записи за 14 дней.
+// Выбор живёт в памяти экрана: в данные он не пишется.
+let copyScope = 'all';
 // пять тапов по версии в «О приложении»: включить или выключить диагностику
 let versionTaps = 0;
 let versionTapTimer = null;
@@ -802,18 +824,24 @@ const SCREENS = {
           <h1>Что происходит?</h1>
         </header>
         <div class="grid">
-          ${TRIAGE.map(
-            (t) =>
-              `<button class="grid__btn" data-act="go" data-screen="result" data-id="${t.id}">${esc(
-                t.label,
-              )}</button>`,
-          ).join('')}
+          ${TRIAGE.filter((t) => t.id !== 'stuck' || featureOn('stuck'))
+            .map(
+              (t) =>
+                `<button class="grid__btn" data-act="go" data-screen="result" data-id="${t.id}">${esc(
+                  t.label,
+                )}</button>`,
+            )
+            .join('')}
         </div>
       </div>`;
   },
 
   result(id) {
-    const t = TRIAGE.find((x) => x.id === id) || TRIAGE[0];
+    const branches = TRIAGE.filter((t) => t.id !== 'stuck' || featureOn('stuck'));
+    const t = branches.find((x) => x.id === id) || branches[0];
+    const skills = rankSkills(t.skills, data.help).filter(
+      (r) => r.id !== 'oneThing' || featureOn('oneThing'),
+    );
     return `
       <div class="screen">
         <button class="back" data-act="back">‹ назад</button>
@@ -822,9 +850,22 @@ const SCREENS = {
           <h1>Попробуй это</h1>
           <p class="lead">Сверху — то, что обычно помогает быстрее всего.</p>
         </header>
-        ${rankSkills(t.skills, data.help)
-          .map((r) => skillCard(r.id, r.weak))
-          .join('')}
+        ${
+          t.note && (t.id !== 'anxiety' || featureOn('panicNote'))
+            ? `<div class="note">${esc(t.note)}</div>`
+            : ''
+        }
+        ${skills.map((r) => skillCard(r.id, r.weak)).join('')}
+        ${
+          t.id === 'urge' && featureOn('urgeSelf')
+            ? `<section class="msgs">
+                 <h2 class="msgs__title">${esc(URGE_SELF_TITLE)}</h2>
+                 <ul class="msgs__hint">
+                   ${URGE_SELF_LINES.map((l) => `<li>${esc(l)}</li>`).join('')}
+                 </ul>
+               </section>`
+            : ''
+        }
         <button class="btn btn--ghost" data-act="go" data-screen="triage">
           Это не то, что со мной
         </button>
@@ -832,6 +873,10 @@ const SCREENS = {
   },
 
   skill(id) {
+    // Флаги новых навыков: выключенный навык не открывается и не показывается
+    // в развилке. Его оценка в help при этом остаётся в данных как есть.
+    if (id === 'oneThing' && !featureOn('oneThing')) return SCREENS.home();
+    if (id === 'firstAction' && !featureOn('stuck')) return SCREENS.home();
     const s = SKILLS[id];
     if (!s) return SCREENS.home();
 
@@ -891,6 +936,7 @@ const SCREENS = {
             <h1>Выбери ритм</h1>
             <p class="lead">Не важно, какой выберешь. Важен длинный выдох.</p>
           </header>
+          ${featureOn('panicNote') ? `<div class="note">${esc(PANIC_NOTE)}</div>` : ''}
           ${Object.entries(BREATHS)
             .map(
               ([key, b]) => `
@@ -1044,12 +1090,24 @@ const SCREENS = {
               )}</textarea>
             </div>`,
           ).join('')}
+          ${featureOn('cardAway')
+            ? `<div class="field">
+            <label class="field__label" for="f-away">${esc(CARD_AWAY_TITLE)}</label>
+            <span class="field__hint">${esc(CARD_AWAY_HINT)}</span>
+            <textarea id="f-away" rows="1" placeholder="${esc(
+              CARD_AWAY_PLACEHOLDER,
+            )}">${esc(data.card.away || '')}</textarea>
+          </div>`
+            : ''}
           <button class="btn btn--primary" data-act="card-save">Сохранить</button>
           <button class="btn btn--ghost" data-act="card-cancel">Отмена</button>
         </div>`;
     }
 
     const empty = CRISIS_FIELDS.every((f) => !(data.card[f.key] || '').trim());
+    const person = firstPerson(data.card.people);
+    const away = awayText(data.card);
+    const steps = planSteps(data.card.plan);
 
     return `
       <div class="screen">
@@ -1067,6 +1125,18 @@ const SCREENS = {
             : ''
         }
 
+        ${
+          featureOn('cardFirst') && person
+            ? `<section class="firstcall">
+                 <div class="eyebrow">${esc(CARD_FIRST_TITLE)}</div>
+                 <div class="firstcall__name">${esc(person)}</div>
+               </section>`
+            : ''
+        }
+
+        <!-- 112 не под флагом: карточка может быть пустой, а помощь — нет. -->
+        <a class="risk" href="tel:112">${esc(CARD_RISK_LINE)}</a>
+
         ${CRISIS_FIELDS.map((f) => {
           const val = (data.card[f.key] || '').trim();
           return `
@@ -1076,10 +1146,50 @@ const SCREENS = {
             </div>`;
         }).join('')}
 
+        ${
+          featureOn('cardAway') && away
+            ? `<div class="field-block">
+                 <h2>${esc(CARD_AWAY_TITLE)}</h2>
+                 <div class="val">${esc(away)}</div>
+               </div>`
+            : ''
+        }
+
         <div class="safety">${esc(AFTER_MEDS_CARD)}</div>
 
+        ${
+          featureOn('cardPlan') && steps.length
+            ? `<button class="btn btn--primary" data-act="plan-start">${esc(PLAN_BUTTON)}</button>`
+            : ''
+        }
         <button class="btn" data-act="card-edit">${empty ? 'Заполнить' : 'Изменить'}</button>
         <button class="btn btn--ghost" data-act="go" data-screen="contacts">Контакты и звонки</button>
+      </div>`;
+  },
+
+  /**
+   * «Пройти план»: шаги из карточки по одному, крупно. Это не навык и не
+   * лечение — только слова человека, разложенные по шагам. Прогресс не
+   * сохраняется: вышла — план снова с начала, и это не провал.
+   */
+  plan() {
+    if (!featureOn('cardPlan')) return SCREENS.card();
+    const steps = planSteps(data.card.plan);
+    if (!steps.length) return SCREENS.card();
+    const i = Math.min(planStep, steps.length - 1);
+    return `
+      <div class="screen">
+        <button class="back" data-act="back">‹ назад</button>
+        <div class="stepper">
+          <div class="eyebrow">${esc(PLAN_EYEBROW)}</div>
+          <div class="step__num">шаг ${i + 1} из ${steps.length}</div>
+          <div class="step__text">${esc(steps[i])}</div>
+          <p class="muted small">${esc(PLAN_LEAD)}</p>
+          <button class="btn btn--primary" data-act="plan-next">
+            ${i === steps.length - 1 ? esc(PLAN_DONE) : esc(PLAN_NEXT)}
+          </button>
+          <a class="risk" href="tel:112">${esc(CARD_RISK_LINE)}</a>
+        </div>
       </div>`;
   },
 
@@ -1129,6 +1239,8 @@ const SCREENS = {
         <h2 class="section">${esc(KIDS_TITLE)}</h2>
         ${KIDS_CONTACTS.map(contactLink).join('')}
         <button class="btn" data-act="contacts-edit">Изменить список</button>
+        ${featureOn('firstStep') ? firstStepBlock() : ''}
+        ${featureOn('noOne') ? noOneBlock() : ''}
         ${messagesBlock()}
       </div>`;
   },
@@ -1269,6 +1381,8 @@ const SCREENS = {
               ? `<div class="empty">${esc(TOPIC_EMPTY)}</div>`
               : `<div class="empty">Записей пока нет. Это нормально.</div>`
         }
+
+        ${sleepHistoryBlock()}
       </div>`;
   },
 
@@ -1361,6 +1475,7 @@ const SCREENS = {
           <h1>${esc(MEDS_TITLE)}</h1>
           <p class="lead">${esc(MEDS_LEAD)}</p>
         </header>
+        ${featureOn('medsExpect') ? `<div class="note">${esc(MEDS_EXPECT)}</div>` : ''}
         ${statusBlock()}
         ${active.map(row).join('')}
         ${!data.meds.length ? `<div class="empty">${esc(MEDS_EMPTY)}</div>` : ''}
@@ -1447,18 +1562,24 @@ const SCREENS = {
   /* ------------------------------ прочее -------------------------- */
 
   more() {
-    // «Отправить» — только там, где системный лист есть: кнопка, которая
-    // заведомо ответит «не умеет», — тупик. Два других пути есть всегда.
-    const canSend = typeof navigator.share === 'function';
-    // Отказ окна уже был в этой сессии: sendCopy() поставил shareRefused.
-    // Тогда главный путь — текст копии, а «Отправить» остаётся вторичной
-    // с пометкой: прятать её значило бы делать вид, что пути нет.
-    const sendBroken = shareRefused && canSend;
-    const download = `<button class="btn ${
-      !canSend && !sendBroken ? 'btn--primary' : ''
-    }" data-act="export-download">${esc(EXPORT_DOWNLOAD_BUTTON)}</button>`;
+    // Два пути наружу, порядок один на всех устройствах: текст копии —
+    // главный (он работает всегда), скачивание — второй. Системного листа
+    // здесь нет: на её телефоне он отвечает отказом независимо от типа файла.
     const copyPrimary = `<button class="btn btn--primary" data-act="export-copy-text">${esc(EXPORT_COPY_BUTTON)}</button>`;
-    const copySmall = `<button class="btn btn--ghost btn--small" data-act="export-copy-text">${esc(EXPORT_COPY_BUTTON)}</button>`;
+    const download = `<button class="btn" data-act="export-download">${esc(EXPORT_DOWNLOAD_BUTTON)}</button>`;
+    const recentMode = featureOn('copyRecent');
+    const recent = recentMode && copyScope === 'recent';
+    const scope = recentMode
+      ? `
+      <div class="chips" role="group" aria-label="${esc(COPY_SCOPE_LABEL)}">
+        <button class="chip ${recent ? '' : 'on'}" data-act="copy-scope" data-scope="all">
+          ${esc(COPY_SCOPE_ALL)}
+        </button>
+        <button class="chip ${recent ? 'on' : ''}" data-act="copy-scope" data-scope="recent">
+          ${esc(COPY_SCOPE_RECENT)}
+        </button>
+      </div>`
+      : '';
     return `
       <div class="screen">
         <button class="back" data-act="back">‹ назад</button>
@@ -1472,21 +1593,10 @@ const SCREENS = {
 
         <section class="copy">
           <h2 class="copy__title">Копия</h2>
-          ${
-            sendBroken
-              ? `${copyPrimary}
-                 ${canSend ? `<button class="btn" data-act="export-send">${esc(EXPORT_SEND_BUTTON)}</button>` : ''}
-                 <p class="hint">${esc(EXPORT_SEND_BROKEN)}</p>
-                 ${download}`
-              : `${
-                  canSend
-                    ? `<button class="btn btn--primary" data-act="export-send">${esc(EXPORT_SEND_BUTTON)}</button>`
-                    : ''
-                }
-                 ${download}
-                 ${copySmall}`
-          }
-          <p class="hint">${esc(COPY_NOTE)}</p>
+          ${scope}
+          ${copyPrimary}
+          ${download}
+          <p class="hint">${esc(recent ? COPY_NOTE_RECENT : COPY_NOTE)}</p>
         </section>
 
         <section class="copy">
@@ -1530,11 +1640,19 @@ const SCREENS = {
         </p>
         <p class="muted small">
           Если телефон потеряется или данные браузера сотрут полностью — записи исчезнут.
-          Поэтому есть копия: на телефоне кнопка пересылает файл в мессенджер,
-          на компьютере — скачивает. Если файл не уходит, текст копии можно
-          скопировать и вставить в переписку.
+          Поэтому есть копия. Первый путь работает всегда: «Скопировать текст копии» —
+          и вставить в переписку. Второй: «Скачать файл» на компьютер или в «Файлы»
+          телефона.
         </p>
         <p class="muted small">${esc(ABOUT_SCHEMA_NOTE)}</p>
+        <p class="muted small">
+          Что появилось в этой версии: у развилки есть состояние «застряла, не могу начать» —
+          оно уменьшает дело до первого движения тела. В дневнике видно, как спалось.
+          Карточку можно пройти по шагам, а рядом с первым именем всегда стоит 112.
+          В контактах — «первый шаг к врачу» и «если звонить некому».
+          Готовых фраз близким стало больше. Копию можно сделать короче: только записи
+          дневника, без карточки и препаратов. Это не лечение, а способы пережить минуту.
+        </p>
         <div class="note">
           ${esc(SAFETY_NOTE)}
           Если есть угроза для жизни — это не к приложению, это в скорую.
@@ -1563,24 +1681,97 @@ function skillCard(id, weak = false) {
     </button>`;
 }
 
-function contactLink(c) {
+function contactLink(c, showNumber = false) {
   return `
     <a class="contact" href="tel:${esc(dialable(c.phone))}">
       <div class="contact__body">
         <div class="contact__name">${esc(c.label)}</div>
+        ${showNumber ? `<div class="contact__num">${esc(prettyPhone(c.phone))}</div>` : ''}
         ${c.note ? `<div class="contact__note">${esc(c.note)}</div>` : ''}
       </div>
       <div class="contact__call">позвонить</div>
     </a>`;
 }
 
+/** Номер для глаза: 8 495 989-50-50. Данные не меняются — только подпись. */
+function prettyPhone(p) {
+  const d = dialable(p);
+  return /^8\d{10}$/.test(d)
+    ? `8 ${d.slice(1, 4)} ${d.slice(4, 7)}-${d.slice(7, 9)}-${d.slice(9)}`
+    : d;
+}
+
+/**
+ * «Как спалось»: строки, которые человек сам заполнил. Нет строк — нет
+ * блока: пустая рамка «здесь будет ваша статистика» была бы заданием.
+ * Ни средних, ни нормы, ни «N из 14».
+ */
+function sleepHistoryBlock() {
+  // Выключенный флаг не читает записи вовсе: блок не создаётся, а не
+  // создаётся пустым.
+  if (!featureOn('sleepHistory')) return '';
+  const rows = sleepLines(data.entries, { line: SLEEP_LINE, nap: SLEEP_NAP_LINE });
+  if (!rows.length) return '';
+  return `
+    <section class="sleeplog">
+      <h2 class="section">${esc(SLEEP_HISTORY_TITLE)}</h2>
+      <p class="hint">${esc(SLEEP_HISTORY_HINT)}</p>
+      ${rows
+        .map(
+          (r) =>
+            `<div class="sleeplog__row">${
+              r.d ? `<span class="sleeplog__d">${esc(fmtDay(r.d))}</span> · ` : ''
+            }${esc(r.text)}</div>`,
+        )
+        .join('')}
+    </section>`;
+}
+
+/**
+ * «Первый шаг к врачу»: что сказать и что взять. Это не совет лечиться и не
+ * обещание, что там помогут, — только слова, которые человек может взять
+ * своими. Ни адресов, ни сроков: их нельзя подтвердить.
+ */
+function firstStepBlock() {
+  return `
+    <section class="msgs">
+      <h2 class="msgs__title">${esc(FIRST_STEP_TITLE)}</h2>
+      <p class="msgs__hint">${esc(FIRST_STEP_LEAD)}</p>
+      <ul class="msgs__hint">${FIRST_STEP_SAY.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>
+      <h3 class="msgs__sub">${esc(FIRST_STEP_TAKE_TITLE)}</h3>
+      <ul class="msgs__hint">${FIRST_STEP_TAKE.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>
+      <p class="msgs__hint">${esc(FIRST_STEP_NOTE)}</p>
+    </section>`;
+}
+
+/**
+ * «Если звонить некому». Номера берутся не из головы, а из DEFAULT_CONTACTS
+ * по белому списку: 112 и линия МЧС. Своих записей этот блок не читает —
+ * иначе он показывал бы то, что человек сам стёр.
+ */
+function noOneBlock() {
+  const verified = DEFAULT_CONTACTS.filter((c) => NO_ONE_PHONES.includes(c.phone));
+  return `
+    <section class="msgs">
+      <h2 class="msgs__title">${esc(NO_ONE_TITLE)}</h2>
+      <p class="msgs__hint">${esc(NO_ONE_TEXT)}</p>
+      ${verified.map((c) => contactLink(c, true)).join('')}
+      <p class="msgs__hint">${esc(NO_ONE_LETTER)}</p>
+      <button class="btn btn--ghost" data-act="go" data-screen="skill" data-id="letter">
+        Письмо, которое не отправится
+      </button>
+    </section>`;
+}
+
 function messagesBlock() {
+  // Три новые фразы — за флагом: выключенный блок оставляет те три, что были.
+  const list = featureOn('messagesExtra') ? MESSAGES : MESSAGES.slice(0, 3);
   return `
     <section class="msgs">
       <h2 class="msgs__title">${esc(MESSAGES_TITLE)}</h2>
       <p class="msgs__hint">${esc(MESSAGES_HINT)}</p>
       <div class="msgs__list">
-        ${MESSAGES.map(
+        ${list.map(
           (m) => `
           <button class="msg" data-act="copy" data-id="${m.id}">
             <span class="msg__label">${esc(m.label)}</span>
@@ -1809,43 +2000,28 @@ async function pasteFromClipboard() {
 }
 
 /**
- * Текст копии. Один и тот же для всех трёх путей наружу: файл, лист
- * «Поделиться» и буфер. Копия не зашифрована — так и подписана на экране.
+ * Текст копии. Один и тот же для обоих путей наружу: файл и буфер.
+ * В режиме «только записи за 14 дней» конверт тот же, а в данных нет
+ * карточки, контактов, письма и препаратов — это режим «показать врачу».
+ * Копия не зашифрована — так и подписана на экране.
  */
 function buildCopy() {
-  return JSON.stringify(buildExport(data, SITE_VERSION));
+  return JSON.stringify(buildExport(data, SITE_VERSION, new Date(), {
+    entriesOnly: featureOn('copyRecent') && copyScope === 'recent',
+  }));
 }
 
 /**
  * Файл копии: имя латиницей и дата, без русских слов — файл может уехать
  * в чужой чат, и имя должно открываться на любом устройстве.
- * Типы перечислены один раз: и проба в диагностике, и повтор при TypeError
- * берут их отсюда, а не из второго списка.
  */
-const COPY_TYPES = ['application/json', 'text/plain', 'application/octet-stream'];
-
-function copyFile(text, type = COPY_TYPES[0]) {
-  const name = exportName(new Date()).replace(/\.json$/, type === 'text/plain' ? '.txt' : '.json');
-  return new File([text], name, { type });
+function copyFile(text) {
+  return new File([text], exportName(new Date()), { type: 'application/json' });
 }
 
 function makeCopyFile(text) {
   const file = copyFile(text);
   return { name: file.name, file };
-}
-
-/**
- * canShare({ files }) для настоящего файла копии: true / false,
- * либо null — метода нет или он упал на проверке.
- */
-function canShareFiles(file) {
-  if (!file) return null;
-  try {
-    if (typeof navigator.canShare !== 'function') return null;
-    return navigator.canShare({ files: [file] }) === true;
-  } catch {
-    return null;
-  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1882,42 +2058,18 @@ function toggleDebug() {
   return next;
 }
 
-/** Файлы трёх типов: видно, что именно отвергает браузер телефона. */
-function probeFiles() {
-  const payload = JSON.stringify(buildExport(data, SITE_VERSION), null, 2);
-  return COPY_TYPES.map((type) => [type, copyFile(payload, type)]);
-}
-
-function canShareProbe(file) {
-  if (typeof navigator.canShare !== 'function') return 'метода нет';
-  try {
-    return navigator.canShare({ files: [file] }) ? 'true' : 'false';
-  } catch (e) {
-    return `ошибка ${e?.name || '?'}`;
-  }
-}
-
 /**
- * Строка диагностики — построчно, без догадок: что есть в браузере,
- * что он отвечает про каждый тип файла и чем кончилась последняя попытка.
- * «Оболочка» стоит здесь потому, что встроенное окно мессенджера отвечает
- * на всё «Permission denied», и по этой строке видно, где мы находимся,
- * без вычислений из кода ошибки.
+ * Строка диагностики — построчно, без догадок: в каком окне открыто
+ * приложение, какой движок и сколько точек касания. Строк про системный
+ * лист здесь нет: пути, который они описывали, больше нет.
  */
 function debugBlock() {
   if (!debugEnabled()) return '';
-  const probes = probeFiles();
   const lines = [
     `оболочка: ${shellOf(navigator.userAgent, isStandalone)}`,
     `движок: ${engineOf(navigator.userAgent)}`,
-    `активация: ${shareActivation || '—'}`,
-    `share: ${typeof navigator.share}`,
-    `canShare: ${typeof navigator.canShare}`,
-    ...probes.map(([type, file]) => `canShare(${type}): ${canShareProbe(file)}`),
     `maxTouchPoints: ${navigator.maxTouchPoints ?? '?'}`,
-    `ошибка: ${shareError || '—'}`,
   ];
-  if (shareMessage) lines.push(`сообщение: ${shareMessage}`);
   return `
     <div class="debug">
       <div>${esc(EXPORT_DEBUG)}</div>
@@ -1926,106 +2078,18 @@ function debugBlock() {
 }
 
 /**
- * Доставка. У всех трёх путей одно общее: копия собирается из текущих
+ * Доставка. У обоих путей одно общее: копия собирается из текущих
  * данных и уходит целиком. Обрезки и «почти отправили» нет.
  */
-
-/**
- * Текст отказа. Совета «открой сайт в Chrome или Safari» здесь больше нет:
- * человек уже в браузере, а на iOS у иконки на главном экране своё хранилище,
- * и в Safari он увидел бы пустой дневник. Поэтому названы два выхода,
- * которые работают всегда: текст копии и файл из «Файлов».
- */
-function shareRefusedNotice() {
-  return EXPORT_SHARE_REFUSED;
-}
-
-/**
- * Была ли активация в момент вызова share. Снимается до вызова: после
- * отказа браузер уже погасил её, и строка говорила бы не о том.
- * `navigator.userActivation` есть не везде — тогда так и пишем.
- */
-function activationNow() {
-  const ua = navigator.userActivation;
-  if (!ua) return 'нет API';
-  return ua.isActive ? 'да' : 'нет';
-}
-
-/**
- * «Отправить»: системный лист с файлом копии (там будет Telegram и всё
- * остальное). Ветку решает canShare({files}), а не наличие share:
- * «браузер не умеет» — не сбой, и текст у него другой.
- *
- * После падения исходы разные (store.js, shareOutcome):
- *   refused — повтор бессмысленен, тип файла ни при чём: говорим выход,
- *             а на сессию главным путём становится текст копии;
- *   retry   — старый движок не знает json: одна попытка с text/plain;
- *   silent  — лист закрыли сами: экран не трогаем;
- *   failed  — остальное: честный «не получилось» и два фолбэка.
- */
-async function sendCopy() {
-  const text = buildCopy();
-  const json = copyFile(text, COPY_TYPES[0]);
-  shareError = '';
-  shareMessage = '';
-  shareActivation = '';
-
-  if (typeof navigator.share !== 'function') {
-    shareError = 'navigator.share отсутствует';
-    notice = EXPORT_SHARE_UNAVAILABLE;
-    render();
-    return;
-  }
-  if (canShareFiles(json) === false) {
-    shareError = 'canShare({files}) === false';
-    notice = EXPORT_SHARE_CANT;
-    render();
-    return;
-  }
-
-  try {
-    shareActivation = activationNow();
-    await navigator.share({ files: [json] });
-  } catch (e) {
-    const outcome = shareOutcome(e);
-    if (outcome === 'silent') return;
-    shareError = e?.name || 'без имени';
-    shareMessage = e?.message || '';
-    if (outcome === 'refused') shareRefused = true;
-    if (outcome !== 'retry') {
-      notice = outcome === 'refused' ? shareRefusedNotice() : EXPORT_SHARE_FAILED;
-      render();
-      return;
-    }
-    // Один повтор с text/plain: то же содержимое, имя .txt. Дальше не идём —
-    // третий раз падало бы так же.
-    try {
-      shareActivation = activationNow();
-      await navigator.share({ files: [copyFile(text, 'text/plain')] });
-    } catch (e2) {
-      const outcome2 = shareOutcome(e2);
-      if (outcome2 === 'silent') return;
-      shareError = e2?.name || 'без имени';
-      shareMessage = e2?.message || '';
-      // Второй отказ по типу — это по-прежнему «окно не даёт»; но если
-      // движок упал по другой причине, честнее общий текст, а не диагноз.
-      if (outcome2 !== 'failed') shareRefused = true;
-      notice = outcome2 === 'failed' ? EXPORT_SHARE_FAILED : shareRefusedNotice();
-      render();
-      return;
-    }
-  }
-  // Успех снимает пометку отказа: иначе экран говорит «передано»
-  // и одновременно «не работает».
-  shareRefused = false;
-  notice = EXPORT_SHARE_DONE;
-  render();
-}
 
 /** Текст копии в буфер: работает и там, где файл не уходит. */
 async function copyExportText() {
   const ok = await copyText(buildCopy());
-  notice = ok ? EXPORT_COPY_DONE : EXPORT_COPY_FAILED;
+  notice = ok
+    ? copyScope === 'recent'
+      ? EXPORT_COPY_DONE_RECENT
+      : EXPORT_COPY_DONE
+    : EXPORT_COPY_FAILED;
   render();
 }
 
@@ -2060,6 +2124,17 @@ const MOUNT = {
     const s = SKILLS[id];
     const total = (s?.start?.minutes ?? 1) * 60;
     startTimer(total);
+  },
+
+  /**
+   * «Пройти план» с клавиатуры: открыли — фокус на «Дальше», дальше Enter.
+   * Без этого после открытия фокус остался бы на кнопке прошлого экрана,
+   * которой уже нет в документе.
+   */
+  plan() {
+    requestAnimationFrame(() => {
+      view.querySelector('[data-act="plan-next"]')?.focus();
+    });
   },
 
   calm() {
@@ -2401,16 +2476,48 @@ document.addEventListener('click', async (e) => {
       render();
       break;
 
-    case 'card-save':
+    case 'card-save': {
       for (const f of CRISIS_FIELDS) {
         const el2 = document.getElementById('f-' + f.key);
         data.card[f.key] = el2 ? el2.value.trim() : '';
+      }
+      // «Что убрать подальше» необязательно: пустое поле ключ не заводит,
+      // чтобы старая карточка не обрастала пустыми строками. Выключенный
+      // флаг не читает поле и не трогает уже сохранённое значение.
+      if (featureOn('cardAway')) {
+        const away = (document.getElementById('f-away')?.value || '').trim();
+        if (away) data.card.away = away;
+        else delete data.card.away;
       }
       data.cardTs = Date.now();
       save();
       cardEdit = false;
       render();
       break;
+    }
+
+    case 'plan-start':
+      if (!featureOn('cardPlan')) break;
+      planStep = 0;
+      go('plan');
+      break;
+
+    case 'plan-next': {
+      if (!featureOn('cardPlan')) break;
+      const steps = planSteps(data.card.plan);
+      if (!steps.length) {
+        go('card');
+        break;
+      }
+      if (planStep >= steps.length - 1) {
+        planStep = 0;
+        go('card');
+      } else {
+        planStep += 1;
+        render();
+      }
+      break;
+    }
 
     /* -------------------------- контакты ------------------------- */
 
@@ -2660,16 +2767,21 @@ document.addEventListener('click', async (e) => {
       }
       break;
 
-    case 'export-send':
-      await sendCopy();
-      break;
-
     case 'export-download':
       await downloadCopy();
       break;
 
     case 'export-copy-text':
       await copyExportText();
+      break;
+
+    // что в копии: всё или только записи дневника за 14 дней.
+    // Переключение только перерисовывает «Ещё»: данные не трогаются.
+    case 'copy-scope':
+      if (!featureOn('copyRecent')) break;
+      copyScope = el.dataset.scope === 'recent' ? 'recent' : 'all';
+      notice = '';
+      render();
       break;
 
     // восстановление текстом: буфер, а если не дал — поле для вставки

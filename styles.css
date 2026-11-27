@@ -372,6 +372,19 @@ button {
   line-height: 1.55;
 }
 
+/* Подсказка, которую надо прочитать до действий: пик паники, ожидания
+   от препаратов. Не тревожная рамка (.caution), а спокойная плашка. */
+.note {
+  margin-top: 20px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Пошаговый навык                                                   */
 /* ------------------------------------------------------------------ */
@@ -616,6 +629,34 @@ input::placeholder {
   font-size: 14px;
 }
 
+/* Первое имя из «кому я могу позвонить» — крупно, как «кому звонить первым».
+   Это имя, а не номер: строка не звонит и не обещает, что человек ответит. */
+.firstcall {
+  padding: 16px 17px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  margin-bottom: 12px;
+}
+
+.firstcall__name {
+  font-size: 24px;
+  line-height: 1.25;
+  font-weight: 600;
+  margin: 4px 0 6px;
+  overflow-wrap: break-word;
+}
+
+/* 112 рядом с планом и с первым именем: цель 44 px, как у остальных ссылок. */
+.risk {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--accent);
+  font-size: 15px;
+  text-decoration: underline;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Контакты                                                          */
 /* ------------------------------------------------------------------ */
@@ -661,6 +702,35 @@ input::placeholder {
   font-size: 12.5px;
   margin-top: 3px;
   line-height: 1.4;
+}
+
+/* Номер виден словами — только в блоке «если звонить некому»: там важно
+   не угадывать, куда ведёт кнопка. */
+.contact__num {
+  margin-top: 3px;
+  font-size: 15px;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+/* «Как спалось»: список строк, не таблица и не график. */
+.sleeplog {
+  margin-top: 30px;
+}
+
+.sleeplog__row {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.sleeplog__row:last-child {
+  border-bottom: 0;
+}
+
+.sleeplog__d {
+  color: var(--muted);
 }
 
 .contact__call {
@@ -1189,6 +1259,18 @@ input::placeholder {
   font-size: 17px;
   line-height: 1.45;
   margin-bottom: 14px;
+}
+
+/* Подзаголовок внутри блока: «что взять». */
+.msgs__sub {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 4px 0 6px;
+}
+
+.msgs ul {
+  margin: 0 0 14px;
+  padding-left: 20px;
 }
 
 .msgs__list {

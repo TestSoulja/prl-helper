@@ -474,14 +474,38 @@ export function exportName(date = new Date()) {
  * Содержимое файла копии. Номер схемы стоит и в конверте, и в данных:
  * конверт читает эта версия, данные — любая, кому файл достанется.
  */
-export function buildExport(raw, version, date = new Date()) {
+export function buildExport(raw, version, date = new Date(), { entriesOnly = false } = {}) {
   const m = migrate(raw);
+  const data = m.data;
+  // Копия «только записи за 14 дней»: тот же конверт, та же схема, но в данных
+  // нет ни карточки, ни контактов, ни письма, ни препаратов с отметками.
+  // Пустые блоки и нулевые отметки времени нужны явно: без них `help`
+  // и `cardTs`/`contactsTs`/`letterTs` уезжали из полной копии, хотя подпись
+  // обещает «только записи дневника». Слияние при импорте устроено так, что
+  // пустые списки и старые отметки времени ничего не стирают.
+  const subset = entriesOnly
+    ? {
+        ...data,
+        card: {},
+        contacts: [],
+        letter: '',
+        meds: [],
+        marks: [],
+        help: {},
+        cardTs: 0,
+        contactsTs: 0,
+        letterTs: 0,
+        entries: [...data.entries]
+          .sort((a, b) => Number(a.t || 0) - Number(b.t || 0))
+          .slice(-14),
+      }
+    : data;
   return {
     app: APP,
     schema: m.schema,
     version: String(version),
     exportedAt: date.toISOString(),
-    data: m.data,
+    data: subset,
   };
 }
 
@@ -512,31 +536,9 @@ export function copyKind(text) {
 }
 
 /**
- * Чем кончилась попытка «Поделиться». Пять исходов: четыре отказа требуют
- * разных слов, а не одного «не получилось».
- *   'done'    — ушло;
- *   'silent'  — человек сам закрыл лист (это нормально, экран не трогаем);
- *   'refused' — окно не дало отправить (NotAllowedError/SecurityError).
- *               От типа файла это не зависит: повтор упадёт так же;
- *   'retry'   — движок не знает тип или файлы (TypeError/NotSupportedError).
- *               Здесь один повтор с text/plain имеет смысл;
- *   'failed'  — остальное: о нём говорим, но обещать выход не берёмся.
- */
-export function shareOutcome(error) {
-  if (!error) return 'done';
-  const name = error?.name;
-  if (name === 'AbortError') return 'silent';
-  if (name === 'NotAllowedError' || name === 'SecurityError') return 'refused';
-  if (name === 'TypeError' || name === 'NotSupportedError') return 'retry';
-  return 'failed';
-}
-
-/**
  * В каком окне открыто приложение. `Telegram` в userAgent — встроенное окно
- * мессенджера, `; wv` — Android WebView. Там системный лист «Поделиться»
- * файл не отдаёт (проверено на телефоне 25.11.2026: NotAllowedError при
- * canShare === true), и знать это надо по имени оболочки, а не вычислять
- * из кода ошибки.
+ * мессенджера, `; wv` — Android WebView. Строка нужна диагностике: по ней
+ * видно, где открыто приложение, без вычислений из кода ошибки.
  */
 export function shellOf(ua = '', standalone = false) {
   const s = String(ua);

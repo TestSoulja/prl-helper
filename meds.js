@@ -114,10 +114,31 @@ export function toggleMed(marks = [], d = '', medId = '', state = '', ts = Date.
  */
 export function sleepText(entry, words) {
   const parts = [];
-  const h = Number(entry?.sleepH);
+  const raw = entry?.sleepH;
+  // Пустая строка — это «не заполнено», а не ноль часов: Number('') === 0.
+  const h = raw === '' || raw === null || raw === undefined ? NaN : Number(raw);
   if (Number.isFinite(h) && h >= 0) {
     parts.push(String(words.line).replace('{h}', String(h).replace('.', ',')));
   }
   if (entry?.nap === true) parts.push(String(words.nap));
   return parts.join(' · ');
+}
+
+/**
+ * «Как спалось»: последние записи, где человек заполнил сон. Только строки —
+ * без средних, нормы и счёта «N из 14». Пустых строк нет: если не заполнено,
+ * записи в списке не видно вовсе.
+ */
+export function sleepLines(entries = [], words, limit = 14) {
+  const filled = (e) => {
+    if (!e) return false;
+    const h = e.sleepH;
+    return (h !== undefined && h !== null && h !== '') || e.nap === true;
+  };
+  return (Array.isArray(entries) ? entries : [])
+    .filter(filled)
+    .sort((a, b) => Number(a.t || 0) - Number(b.t || 0))
+    .slice(-limit)
+    .map((e) => ({ d: e.t ? dayKey(new Date(Number(e.t))) : '', text: sleepText(e, words) }))
+    .filter((row) => row.text);
 }
