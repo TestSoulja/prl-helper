@@ -17,6 +17,7 @@ import {
   CARD_AWAY_HINT,
   CARD_AWAY_PLACEHOLDER,
   AFTER_MEDS_CARD,
+  AFTER_MEDS_CARD_SHORT,
   AFTER_MEDS_CONTACTS,
   MEDS_TITLE,
   MEDS_LEAD,
@@ -39,6 +40,11 @@ import {
   MED_MODE_LABEL,
   MED_MODE_REGULAR,
   MED_MODE_ASNEEDED,
+  MED_SLOTS_LABEL,
+  MED_SLOTS_ONCE,
+  MED_SLOTS_TWICE,
+  SLOT_MORNING,
+  SLOT_EVENING,
   MED_SINCE,
   MED_STOPPED_AT,
   MARKS_TITLE,
@@ -47,8 +53,10 @@ import {
   SLEEP_LABEL,
   SLEEP_UNIT,
   SLEEP_NAP,
+  SLEEP_NAP_H_LABEL,
   SLEEP_LINE,
   SLEEP_NAP_LINE,
+  SLEEP_NAP_H_LINE,
   MONTHS_GEN,
   DEFAULT_CONTACTS,
   LEGACY_CONTACTS,
@@ -184,6 +192,7 @@ import {
   markOf,
   toggleMed,
   markableMeds,
+  slotsOf,
   sleepText,
   sleepLines,
 } from './meds.js';
@@ -400,9 +409,20 @@ let contactsEdit = false;
 let medEdit = null;
 // режим в открытой форме: 'regular' | 'asneeded'
 let medMode = 'regular';
+// сколько раз в день: 'once' | 'twice' (ключи в данных — morning/evening)
+let medSlots = 'once';
 // набранное в форме при перерисовке (переключение режима): null — из данных
 let medDraft = null;
-let draft = { mood: null, tags: new Set(), note: '', helped: [], helpedAt: {}, sleepH: '', nap: false };
+let draft = {
+  mood: null,
+  tags: new Set(),
+  note: '',
+  helped: [],
+  helpedAt: {},
+  sleepH: '',
+  nap: false,
+  napH: '',
+};
 // какие записи показать в списке: null — все, иначе метка. В данные не пишется.
 let listFilter = null;
 // «помогло» прицепляется к записи, только если ответ свежий: запись
@@ -497,9 +517,9 @@ const entryBlock = (e) => `
     </div>
     ${e.tags?.length ? `<div class="entry__tags">${esc(e.tags.join(' · '))}</div>` : ''}
     ${
-      sleepText(e, { line: SLEEP_LINE, nap: SLEEP_NAP_LINE })
+      sleepText(e, { line: SLEEP_LINE, nap: SLEEP_NAP_LINE, napLine: SLEEP_NAP_H_LINE })
         ? `<div class="entry__sleep">${esc(
-            sleepText(e, { line: SLEEP_LINE, nap: SLEEP_NAP_LINE }),
+            sleepText(e, { line: SLEEP_LINE, nap: SLEEP_NAP_LINE, napLine: SLEEP_NAP_H_LINE }),
           )}</div>`
         : ''
     }
@@ -507,35 +527,59 @@ const entryBlock = (e) => `
   </div>`;
 
 /**
- * Отметка приёма — строка на каждый препарат: имя и две кнопки. Показывается
+ * Отметка приёма — имя препарата и по строке на каждый приём. Показывается
  * только когда есть что отмечать, и молчит, когда ничего не нажато: ни
  * счётчика, ни подписи «не отмечено», ни красного. Повторное нажатие снимает
- * отметку только у этой строки: у соседнего препарата своя.
+ * отметку только у этой строки: у соседнего приёма и соседнего препарата своя.
  */
 function marksBlock() {
   const active = markableMeds(data.meds);
   if (!active.length) return '';
   const day = dayKey();
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
   // Один шаблон кнопки на оба состояния: подписи берутся из content.js,
   // а не переписываются второй раз в разметке.
-  const button = (m, state, label) => `
-          <button class="mark ${markOf(data.marks, day, m.id) === state ? 'on' : ''}"
-            data-act="mark" data-med="${esc(m.id)}" data-state="${state}">
+  const button = (m, slot, state, label) => {
+    const word = slot === 'morning' ? SLOT_MORNING : slot === 'evening' ? SLOT_EVENING : '';
+    const aria = word ? ` aria-label="${esc(`${cap(word)}: ${label}`)}"` : '';
+    return `
+          <button class="mark ${markOf(data.marks, day, m.id, slot) === state ? 'on' : ''}"
+            data-act="mark" data-med="${esc(m.id)}" data-slot="${slot}" data-state="${state}"${aria}>
             ${esc(label)}
           </button>`;
+  };
   const rows = active
-    .map(
-      (m) => `
+    .map((m) => {
+      const slots = slotsOf(m);
+      const lines = slots.length
+        ? slots
+            .map(
+              (slot) => `
+          <div class="marks__row">
+            <span class="marks__slot">${esc(
+              slot === 'morning' ? SLOT_MORNING : SLOT_EVENING,
+            )}</span>${button(m, slot, 'taken', MARK_TAKEN)}${button(
+              m,
+              slot,
+              'skipped',
+              MARK_SKIPPED,
+            )}
+          </div>`,
+            )
+            .join('')
+        : `
+          <div class="marks__row">${button(m, '', 'taken', MARK_TAKEN)}${button(
+            m,
+            '',
+            'skipped',
+            MARK_SKIPPED,
+          )}
+          </div>`;
+      return `
       <div class="marks__med">
-        <div class="marks__name">${esc(m.name)}</div>
-        <div class="marks__row">${button(m, 'taken', MARK_TAKEN)}${button(
-          m,
-          'skipped',
-          MARK_SKIPPED,
-        )}
-        </div>
-      </div>`,
-    )
+        <div class="marks__name">${esc(m.name)}</div>${lines}
+      </div>`;
+    })
     .join('');
   return `
     <div class="marks">
@@ -824,21 +868,18 @@ const SCREENS = {
           <h1>Что происходит?</h1>
         </header>
         <div class="grid">
-          ${TRIAGE.filter((t) => t.id !== 'stuck' || featureOn('stuck'))
-            .map(
-              (t) =>
-                `<button class="grid__btn" data-act="go" data-screen="result" data-id="${t.id}">${esc(
-                  t.label,
-                )}</button>`,
-            )
-            .join('')}
+          ${TRIAGE.map(
+            (t) =>
+              `<button class="grid__btn" data-act="go" data-screen="result" data-id="${t.id}">${esc(
+                t.label,
+              )}</button>`,
+          ).join('')}
         </div>
       </div>`;
   },
 
   result(id) {
-    const branches = TRIAGE.filter((t) => t.id !== 'stuck' || featureOn('stuck'));
-    const t = branches.find((x) => x.id === id) || branches[0];
+    const t = TRIAGE.find((x) => x.id === id) || TRIAGE[0];
     const skills = rankSkills(t.skills, data.help).filter(
       (r) => r.id !== 'oneThing' || featureOn('oneThing'),
     );
@@ -873,10 +914,9 @@ const SCREENS = {
   },
 
   skill(id) {
-    // Флаги новых навыков: выключенный навык не открывается и не показывается
+    // Флаг нового навыка: выключенный навык не открывается и не показывается
     // в развилке. Его оценка в help при этом остаётся в данных как есть.
     if (id === 'oneThing' && !featureOn('oneThing')) return SCREENS.home();
-    if (id === 'firstAction' && !featureOn('stuck')) return SCREENS.home();
     const s = SKILLS[id];
     if (!s) return SCREENS.home();
 
@@ -1155,7 +1195,7 @@ const SCREENS = {
             : ''
         }
 
-        <div class="safety">${esc(AFTER_MEDS_CARD)}</div>
+        <div class="safety">${esc(AFTER_MEDS_CARD_SHORT)}</div>
 
         ${
           featureOn('cardPlan') && steps.length
@@ -1295,11 +1335,25 @@ const SCREENS = {
               <span>${esc(SLEEP_UNIT)}</span>
             </span>
           </label>
-          <button class="sleep__nap ${draft.nap ? 'on' : ''}" data-act="sleep-nap"
-            role="switch" aria-checked="${draft.nap ? 'true' : 'false'}">
-            <span class="sleep__box" aria-hidden="true"></span>
-            <span>${esc(SLEEP_NAP)}</span>
-          </button>
+          <div class="sleep__napwrap">
+            <button class="sleep__nap ${draft.nap ? 'on' : ''}" data-act="sleep-nap"
+              role="switch" aria-checked="${draft.nap ? 'true' : 'false'}">
+              <span class="sleep__box" aria-hidden="true"></span>
+              <span>${esc(SLEEP_NAP)}</span>
+            </button>
+            ${
+              draft.nap
+                ? `<label class="sleep__cell" for="sleep-nap-h">
+              <span class="sleep__t">${esc(SLEEP_NAP_H_LABEL)}</span>
+              <span class="sleep__in">
+                <input id="sleep-nap-h" type="number" inputmode="decimal" min="0" max="24" step="0.5"
+                  value="${esc(draft.napH)}">
+                <span>${esc(SLEEP_UNIT)}</span>
+              </span>
+            </label>`
+                : ''
+            }
+          </div>
         </div>
 
         ${lastHelpedLine()}
@@ -1460,6 +1514,16 @@ const SCREENS = {
             <button class="chip ${medMode === 'asneeded' ? 'on' : ''}"
               data-act="med-mode" data-mode="asneeded">${esc(MED_MODE_ASNEEDED)}</button>
           </div>
+          ${
+            medMode === 'regular'
+              ? `<div class="chips" role="group" aria-label="${esc(MED_SLOTS_LABEL)}">
+            <button class="chip ${medSlots === 'once' ? 'on' : ''}"
+              data-act="med-slots" data-slots="once">${esc(MED_SLOTS_ONCE)}</button>
+            <button class="chip ${medSlots === 'twice' ? 'on' : ''}"
+              data-act="med-slots" data-slots="twice">${esc(MED_SLOTS_TWICE)}</button>
+          </div>`
+              : ''
+          }
           <button class="btn btn--primary" data-act="med-save">${esc(MEDS_SAVE)}</button>
           <button class="btn btn--ghost btn--small" data-act="med-cancel">
             ${esc(MEDS_CANCEL)}
@@ -1640,18 +1704,17 @@ const SCREENS = {
         </p>
         <p class="muted small">
           Если телефон потеряется или данные браузера сотрут полностью — записи исчезнут.
-          Поэтому есть копия. Первый путь работает всегда: «Скопировать текст копии» —
+          Поэтому есть копия. Первый, главный путь: «Скопировать текст копии» —
           и вставить в переписку. Второй: «Скачать файл» на компьютер или в «Файлы»
           телефона.
         </p>
         <p class="muted small">${esc(ABOUT_SCHEMA_NOTE)}</p>
         <p class="muted small">
-          Что появилось в этой версии: у развилки есть состояние «застряла, не могу начать» —
-          оно уменьшает дело до первого движения тела. В дневнике видно, как спалось.
-          Карточку можно пройти по шагам, а рядом с первым именем всегда стоит 112.
-          В контактах — «первый шаг к врачу» и «если звонить некому».
-          Готовых фраз близким стало больше. Копию можно сделать короче: только записи
-          дневника, без карточки и препаратов. Это не лечение, а способы пережить минуту.
+          Что появилось в этой версии: ветки «застряла» больше нет — она убрана.
+          В дневнике можно записать часы дневного сна, если он был.
+          У препарата бывает два приёма — утро и вечер, и отметка ставится на каждый.
+          112 остался на карточке и в контактах, но повторяющихся строк стало меньше.
+          Это не лечение, а способы пережить минуту.
         </p>
         <div class="note">
           ${esc(SAFETY_NOTE)}
@@ -1710,7 +1773,11 @@ function sleepHistoryBlock() {
   // Выключенный флаг не читает записи вовсе: блок не создаётся, а не
   // создаётся пустым.
   if (!featureOn('sleepHistory')) return '';
-  const rows = sleepLines(data.entries, { line: SLEEP_LINE, nap: SLEEP_NAP_LINE });
+  const rows = sleepLines(data.entries, {
+    line: SLEEP_LINE,
+    nap: SLEEP_NAP_LINE,
+    napLine: SLEEP_NAP_H_LINE,
+  });
   if (!rows.length) return '';
   return `
     <section class="sleeplog">
@@ -2166,6 +2233,12 @@ const MOUNT = {
         draft.sleepH = sleep.value;
       });
     }
+    const napH = document.getElementById('sleep-nap-h');
+    if (napH) {
+      napH.addEventListener('input', () => {
+        draft.napH = napH.value;
+      });
+    }
   },
 
   more() {
@@ -2573,6 +2646,8 @@ document.addEventListener('click', async (e) => {
     case 'sleep-nap':
       // черновик уже держит введённые часы: input обновляет draft.sleepH
       draft.nap = !draft.nap;
+      // выключили — блок исчез, и часы дня больше не утверждение
+      if (!draft.nap) draft.napH = '';
       render();
       break;
 
@@ -2598,7 +2673,16 @@ document.addEventListener('click', async (e) => {
       const hRaw = (document.getElementById('sleep-h')?.value || '').trim();
       const h = hRaw === '' ? null : Number(hRaw.replace(',', '.'));
       if (h !== null && Number.isFinite(h) && h >= 0 && h <= 24) entry.sleepH = h;
-      if (draft.nap === true) entry.nap = true;
+      if (draft.nap === true) {
+        entry.nap = true;
+        // Часы дневного сна — только вместе с галочкой: без неё это
+        // не «дневной сон», а непонятное число.
+        const napRaw = (document.getElementById('sleep-nap-h')?.value || '').trim();
+        const napH = napRaw === '' ? null : Number(napRaw.replace(',', '.'));
+        if (napH !== null && Number.isFinite(napH) && napH >= 0 && napH <= 24) {
+          entry.napH = napH;
+        }
+      }
 
       data.entries.push(entry);
       save();
@@ -2610,6 +2694,7 @@ document.addEventListener('click', async (e) => {
         helpedAt: {},
         sleepH: '',
         nap: false,
+        napH: '',
       };
       render();
       break;
@@ -2632,7 +2717,14 @@ document.addEventListener('click', async (e) => {
       // Строка одна: отметка ставится тому препарату, по которому нажали,
       // а повторный тап тем же состоянием снимает её — нажавшая не то
       // не должна оказаться запертой.
-      data.marks = toggleMed(data.marks, dayKey(), el.dataset.med, el.dataset.state, Date.now());
+      data.marks = toggleMed(
+        data.marks,
+        dayKey(),
+        el.dataset.med,
+        el.dataset.slot || '',
+        el.dataset.state,
+        Date.now(),
+      );
       save();
       render();
       break;
@@ -2640,6 +2732,7 @@ document.addEventListener('click', async (e) => {
     case 'med-add':
       medEdit = 'new';
       medMode = 'regular';
+      medSlots = 'once';
       medDraft = null;
       notice = '';
       render();
@@ -2658,6 +2751,7 @@ document.addEventListener('click', async (e) => {
       if (!m) break;
       medEdit = m.id;
       medMode = m.mode;
+      medSlots = slotsOf(m).length ? 'twice' : 'once';
       medDraft = null;
       notice = '';
       render();
@@ -2676,6 +2770,17 @@ document.addEventListener('click', async (e) => {
       render();
       break;
 
+    case 'med-slots':
+      // перерисовка не должна стереть уже набранное в форме
+      medDraft = {
+        name: document.getElementById('med-name')?.value || '',
+        how: document.getElementById('med-how')?.value || '',
+        d: document.getElementById('med-date')?.value || '',
+      };
+      medSlots = el.dataset.slots === 'twice' ? 'twice' : 'once';
+      render();
+      break;
+
     case 'med-save': {
       const name = (document.getElementById('med-name')?.value || '').trim();
       const how = (document.getElementById('med-how')?.value || '').trim();
@@ -2687,12 +2792,17 @@ document.addEventListener('click', async (e) => {
         break;
       }
       const ts = Date.now();
+      // «Утром и вечером» — только у регулярного приёма. У «по необходимости»
+      // отметок нет, поэтому и приёмов в данных нет.
+      const slots =
+        medMode === 'regular' && medSlots === 'twice' ? ['morning', 'evening'] : [];
       if (medEdit === 'new') {
         data.meds.push({
           id: 'm' + ts.toString(36),
           name,
           changes: [{ d, how }],
           mode: medMode,
+          slots,
           stoppedAt: '',
           ts,
         });
@@ -2702,6 +2812,7 @@ document.addEventListener('click', async (e) => {
           const prevHow = lastChange(m)?.how || '';
           m.name = name;
           m.mode = medMode;
+          m.slots = slots;
           m.ts = ts;
           // Пустая правка не рождает строку в истории схемы.
           if (how !== prevHow) {

@@ -945,6 +945,14 @@ input::placeholder {
   gap: 8px;
 }
 
+/* «утро» / «вечер» перед парой кнопок: слово один раз, кнопки рядом. */
+.marks__slot {
+  align-self: center;
+  font-size: 13.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .mark {
   flex: 1;
   min-width: 132px;
@@ -986,6 +994,14 @@ input::placeholder {
 .sleep__cell {
   display: flex;
   flex-direction: column;
+  gap: 4px;
+}
+
+/* Галочка «спала днём» и поле часов под ней: одно под другим, а не вбок. */
+.sleep__napwrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 4px;
 }
 

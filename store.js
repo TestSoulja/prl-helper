@@ -183,6 +183,9 @@ function toEntry(e) {
 /** Режим приёма: ровно два. Третьего («иногда») нет — он ничего не значит. */
 export const MED_MODES = ['regular', 'asneeded'];
 
+/** Приёмы: ключи латиницей, слова («утро», «вечер») — в content.js. */
+export const MED_SLOTS = ['morning', 'evening'];
+
 /** Состояние отметки: ровно два. «Нет отметки» выводится из отсутствия записи. */
 export const MARK_STATES = ['taken', 'skipped'];
 
@@ -197,6 +200,7 @@ function toMed(m) {
     name: txt(m.name),
     changes: Array.isArray(m.changes) ? m.changes.filter(obj).map(toChange) : [],
     mode: MED_MODES.includes(m.mode) ? m.mode : 'regular',
+    slots: Array.isArray(m.slots) ? [...new Set(m.slots.filter((s) => MED_SLOTS.includes(s)))] : [],
     stoppedAt: txt(m.stoppedAt),
     ts: num(m.ts),
   };
@@ -204,7 +208,15 @@ function toMed(m) {
 
 function toMark(k) {
   // state не подменяем на «taken»: выдуманная отметка хуже отсутствующей.
-  return { ...k, d: txt(k.d), med: txt(k.med), state: txt(k.state), ts: num(k.ts) };
+  // slot '' — прежняя отметка дня целиком, так выглядят все отметки до 0.9.1.
+  return {
+    ...k,
+    d: txt(k.d),
+    med: txt(k.med),
+    slot: txt(k.slot),
+    state: txt(k.state),
+    ts: num(k.ts),
+  };
 }
 
 /**
@@ -251,6 +263,24 @@ const entryKey = (e) => {
 };
 
 /**
+ * Заполненное ли это поле сна. Ноль — заполненное (`спала 0 ч` — ответ
+ * человека), пустая строка и отсутствие — нет. `Number('') === 0`,
+ * поэтому одной проверки на число мало.
+ */
+const sleepValue = (v) =>
+  v === '' || v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v);
+
+/** Дополнить свою запись сном из второй копии, не затирая заполненное. */
+function fillSleep(seen, other) {
+  for (const field of ['sleepH', 'napH']) {
+    if (sleepValue(seen[field]) === null && sleepValue(other[field]) !== null) {
+      seen[field] = other[field];
+    }
+  }
+  if (seen.nap !== true && other.nap === true) seen.nap = true;
+}
+
+/**
  * Объединение дневника без потерь: запись с тем же временем считается
  * той же самой. Записи без времени остаются все, но самыми старыми.
  * Список «помогло» у одной и той же записи объединяется: сначала порядок
@@ -268,6 +298,7 @@ export function mergeEntries(a = [], b = []) {
       const seen = index.get(key);
       if (seen) {
         seen.helped = [...seen.helped, ...entry.helped.filter((id) => !seen.helped.includes(id))];
+        fillSleep(seen, entry);
         continue;
       }
       index.set(key, entry);
@@ -322,6 +353,7 @@ function mergeMeds(a = [], b = []) {
         ...m,
         name: bWins && txt(m.name) ? txt(m.name) : txt(prev.name) || txt(m.name),
         mode: bWins && MED_MODES.includes(m.mode) ? m.mode : prev.mode,
+        slots: bWins ? m.slots : prev.slots,
         changes: mergeChanges(prev.changes, m.changes, bWins),
         stoppedAt: bWins ? txt(m.stoppedAt) : txt(prev.stoppedAt),
         ts: Math.max(num(prev.ts), num(m.ts)),
@@ -332,8 +364,10 @@ function mergeMeds(a = [], b = []) {
 }
 
 /**
- * Отметки приёма: ключ — день и препарат. При конфликте побеждает более
- * свежая отметка: человек мог исправить «не приняла» на «приняла».
+ * Отметки приёма: ключ — день, препарат и приём. Без slot в ключе утренняя
+ * и вечерняя отметки одного дня схлопнулись бы в одну при импорте копии.
+ * При конфликте побеждает более свежая отметка: человек мог исправить
+ * «не приняла» на «приняла».
  */
 function mergeMarks(a = [], b = []) {
   const out = new Map();
@@ -341,7 +375,7 @@ function mergeMarks(a = [], b = []) {
     for (const raw of list) {
       if (!obj(raw) || !txt(raw.d) || !txt(raw.med)) continue;
       const k = toMark(raw);
-      const key = `${k.d}|${k.med}`;
+      const key = `${k.d}|${k.med}|${k.slot}`;
       const prev = out.get(key);
       if (!prev || num(k.ts) > num(prev.ts)) out.set(key, k);
     }
