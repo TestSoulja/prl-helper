@@ -140,11 +140,29 @@ import {
   PERSIST_NOTE,
   SLEEP_HISTORY_TITLE,
   SLEEP_HISTORY_HINT,
-  COPY_SCOPE_LABEL,
-  COPY_SCOPE_ALL,
-  COPY_SCOPE_RECENT,
-  COPY_NOTE_RECENT,
-  EXPORT_COPY_DONE_RECENT,
+  MESSAGES_EDIT,
+  MESSAGES_RESET,
+  MESSAGES_DELETE,
+  MESSAGES_SAVE,
+  MESSAGES_CANCEL,
+  MESSAGES_ADD,
+  MESSAGES_OWN_LABEL,
+  MESSAGES_EDIT_LABEL,
+  MESSAGES_EMPTY,
+  MESSAGES_LONG,
+  MESSAGES_LIMIT,
+  MESSAGES_MAX_HINT,
+  MESSAGES_EDITED_LABEL,
+  MESSAGES_HIDDEN,
+  MESSAGES_HIDDEN_BACK,
+  QUICK_BREATH,
+  QUICK_BREATH_META,
+  QUICK_GROUND,
+  QUICK_GROUND_META,
+  QUICK_QUIET,
+  QUICK_QUIET_META,
+  QUICK_CALL,
+  QUICK_CALL_META,
 } from './content.js';
 
 import { rankSkills, bump } from './rank.js';
@@ -164,6 +182,7 @@ import {
   quarantineKey,
   saveOutcome,
   copyKind,
+  emptyDraft,
   SCHEMA_VERSION,
   STORAGE_BAD,
   STORAGE_EMPTY,
@@ -172,7 +191,31 @@ import {
   COPY_TEXT_BAD,
 } from './store.js';
 import { readData, writeData, clearData } from './db.js';
-import { TAB_OF, transition, goBack, stateOf, historyPlan, isTabRoot } from './nav.js';
+import {
+  TAB_OF,
+  transition,
+  goBack,
+  stateOf,
+  historyPlan,
+  isTabRoot,
+  resumeScreen,
+  resumeParent,
+} from './nav.js';
+import {
+  messageList,
+  hiddenBuiltins,
+  saveBuiltin,
+  addOwn,
+  removeMessage,
+  resetBuiltin,
+  restoreHidden,
+  ownFull,
+  MESSAGE_MAX,
+  OWN_MAX,
+  MESSAGE_EMPTY,
+  MESSAGE_LONG,
+  MESSAGE_LIMIT,
+} from './messages.js';
 import {
   tagsWithCounts,
   topicEntries,
@@ -198,6 +241,7 @@ import {
 } from './meds.js';
 import { planSteps, firstPerson, awayText } from './card.js';
 import { featureOn } from './features.js';
+import { addEvent, sessionKind } from './events.js';
 
 /* ------------------------------------------------------------------ */
 /*  Состояние                                                          */
@@ -360,6 +404,120 @@ function save() {
 }
 
 /**
+ * Черновик записи — в данные. Это единственное место хранения: отдельного
+ * ключа нет, иначе копия и восстановление разошлись бы с реальностью.
+ * `ts` свежий у каждого изменения, поэтому очистка после сохранения
+ * не проигрывает старому черновику из второй копии.
+ */
+function draftSnapshot() {
+  return {
+    mood: draft.mood,
+    tags: [...draft.tags],
+    note: draft.note,
+    helped: [...draft.helped],
+    helpedAt: { ...draft.helpedAt },
+    sleepH: draft.sleepH,
+    nap: draft.nap === true,
+    napH: draft.napH,
+    ts: Date.now(),
+  };
+}
+
+function saveDraft() {
+  data.draft = draftSnapshot();
+  save();
+}
+
+/** Очистить черновик после сохранённой записи, не потеряв факт очистки. */
+function clearDraft() {
+  draft = draftOf(emptyDraft());
+  data.draft = draftSnapshot();
+}
+
+/**
+ * Запомнить, где человек остановился. Берём ближайший экран из списка
+ * возврата: из развилки, «побыть», таймера или формы вернёт тот экран,
+ * откуда туда пришли. Глубокие состояния (шаг, сессия, форма) не хранятся.
+ * Пишем только при смене экрана: render() зовётся и без перехода.
+ */
+function rememberScreen() {
+  const chain = [...nav, current];
+  let target = null;
+  for (let i = chain.length - 1; i >= 0 && !target; i -= 1) {
+    target = resumeScreen(chain[i].name, chain[i].id);
+  }
+  if (!target) target = { name: 'home', id: null };
+  const prev = data.resume || {};
+  if (prev.ts && prev.name === target.name && (prev.id ?? null) === target.id) return;
+  data.resume = { name: target.name, id: target.id ?? null, ts: Date.now() };
+  save();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Журнал действий                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Одно событие в журнал. При включённой диагностике не пишется ничего:
+ * отладка не должна менять данные, которые потом поедут в копию.
+ *
+ * Текста здесь нет по построению: eventOf() (events.js) оставляет только
+ * время, вид, обезличенный id, счётчик n, длительность d и флаг done.
+ * Ни заметки, ни карточки, ни адреса, ни фразы близкому сюда не попасть.
+ */
+function journal(kind, fields = {}) {
+  if (debugEnabled()) return;
+  const { events, dropped } = addEvent(
+    data.events,
+    { t: Date.now(), kind, ...fields },
+    data.eventsDropped,
+  );
+  data.events = events;
+  data.eventsDropped = dropped;
+  save();
+}
+
+/** Навык, которому принадлежит экран: у дыхания, заземления и письма он в skillCtx. */
+function flowSkill(name, id) {
+  if (name === 'skill') return id || null;
+  // Дыхание и таймер входят двумя путями: из навыка (skillCtx) и быстрой
+  // плиткой с главной (id). Без второго вход не записался бы вовсе.
+  if (name === 'timer' || name === 'breath') return skillCtx || id || null;
+  if (name === 'grounding' || name === 'write') return skillCtx || null;
+  return null;
+}
+
+/**
+ * Журнал по фактически показанному экрану, а не по нажатию: системный
+ * «назад», вкладка и «Закончить» ведут сюда, и ни один путь не теряется.
+ * render() зовут и без перехода (тап по настроению, «Сохранить») — тогда
+ * экран тот же, и ничего не пишется.
+ */
+function noteScreen(name, id) {
+  const next = { name, id: id ?? null };
+  if (shown.name === next.name && shown.id === next.id) return;
+  shown = next;
+
+  const skill = flowSkill(name, id);
+
+  if (name === 'done' && flow) {
+    // «Готово» — конец сессии, а не выход из неё.
+    journal(sessionKind({ done: true }), { id: flow.id, d: Date.now() - flow.at, done: true });
+    flow = null;
+  } else if (flow && flow.id !== skill) {
+    // ушли, не дойдя до конца: 10 с и больше — попытка, меньше — взгляд
+    const d = Date.now() - flow.at;
+    journal(sessionKind({ ms: d }), { id: flow.id, d });
+    flow = null;
+  }
+
+  if (skill && !flow) {
+    flow = { id: skill, at: Date.now() };
+    journal('skill_open', { id: skill });
+  }
+}
+
+/**
  * Вторая копия при старте: читаем IndexedDB, сливаем с localStorage
  * и раскладываем результат обратно в оба места. Если localStorage
  * вычистили, данные поднимутся из IndexedDB.
@@ -386,6 +544,8 @@ async function hydrate() {
   writeLocal(data);
   writeData(data);
   migrateContactsAndSave();
+  // вторая копия могла быть свежее: черновик берём из неё, а не из памяти
+  draft = draftOf(data.draft);
   render();
 }
 
@@ -413,16 +573,28 @@ let medMode = 'regular';
 let medSlots = 'once';
 // набранное в форме при перерисовке (переключение режима): null — из данных
 let medDraft = null;
-let draft = {
-  mood: null,
-  tags: new Set(),
-  note: '',
-  helped: [],
-  helpedAt: {},
-  sleepH: '',
-  nap: false,
-  napH: '',
-};
+// черновик записи живёт в данных: перезапуск не должен уносить набранное.
+// В памяти метки — Set, в данных массив; см. draftOf()/draftSnapshot().
+function draftOf(saved) {
+  const d = saved || emptyDraft();
+  return {
+    mood: d.mood ?? null,
+    tags: new Set(Array.isArray(d.tags) ? d.tags : []),
+    note: d.note || '',
+    helped: [...(Array.isArray(d.helped) ? d.helped : [])],
+    helpedAt: { ...(d.helpedAt || {}) },
+    sleepH: d.sleepH || '',
+    nap: d.nap === true,
+    napH: d.napH || '',
+  };
+}
+let draft = draftOf(data.draft);
+// правка фразы близким: null — ничего не правится, 'new' — своя фраза,
+// иначе id встроенной или своей. Текст держим здесь, потому что render()
+// пересобирает разметку на каждое действие.
+let msgEdit = null;
+let msgText = '';
+let msgError = '';
 // какие записи показать в списке: null — все, иначе метка. В данные не пишется.
 let listFilter = null;
 // «помогло» прицепляется к записи, только если ответ свежий: запись
@@ -441,9 +613,11 @@ let persisted = null;
 // восстановление текстом: поле вставки и текст в нём
 let pasteOpen = false;
 let pasteText = '';
-// что положить в копию: 'all' — всё, 'recent' — только записи за 14 дней.
-// Выбор живёт в памяти экрана: в данные он не пишется.
-let copyScope = 'all';
+// Журнал действий: какой экран уже учтён и какая сессия навыка идёт.
+// В данные уходят только события; здесь — то, что нужно, чтобы не
+// посчитать один и тот же экран дважды и не потерять выход из навыка.
+let shown = { name: '', id: null };
+let flow = null;
 // пять тапов по версии в «О приложении»: включить или выключить диагностику
 let versionTaps = 0;
 let versionTapTimer = null;
@@ -724,6 +898,9 @@ function switchTab(name) {
   medDraft = null;
   skillCtx = null;
   stepIdx = 0;
+  msgEdit = null;
+  msgText = '';
+  msgError = '';
   // фильтр списка — про просмотр, а не про данные: на другой вкладке он
   // сбрасывается, чтобы старый фильтр не прятал записи молча
   if (name !== 'diary') listFilter = null;
@@ -796,6 +973,11 @@ function render() {
   }
 
   MOUNT[current.name]?.(current.id);
+  // журнал — по экрану, который человек действительно видит
+  noteScreen(current.name, current.id);
+  // запомнили экран уже после отрисовки: если render() зовут без перехода,
+  // rememberScreen() видит тот же экран и в данные не пишет
+  rememberScreen();
 }
 
 /**
@@ -838,13 +1020,46 @@ const SCREENS = {
 
         <div class="quick">
           <button class="quick__item" data-act="go" data-screen="breath" data-id="sigh">
-            Дыхание<span>20 секунд</span>
+            <span class="quick__icon quick__icon--mint" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M3 9.5c2-2.6 4-2.6 6 0s4 2.6 6 0 3.6-2.2 5.2-.7" />
+                <path d="M3 15c2-2.6 4-2.6 6 0s4 2.6 6 0 3.6-2.2 5.2-.7" />
+              </svg>
+            </span>
+            <span class="quick__label">${esc(QUICK_BREATH)}</span>
+            <span class="quick__meta">${esc(QUICK_BREATH_META)}</span>
           </button>
           <button class="quick__item" data-act="go" data-screen="skill" data-id="ground5">
-            Заземление<span>3 минуты</span>
+            <span class="quick__icon quick__icon--warm" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M12 4.5v9.5" />
+                <path d="M8 10.4 12 14.4l4-4" />
+                <path d="M4.5 19h15" />
+              </svg>
+            </span>
+            <span class="quick__label">${esc(QUICK_GROUND)}</span>
+            <span class="quick__meta">${esc(QUICK_GROUND_META)}</span>
           </button>
           <button class="quick__item" data-act="go" data-screen="skill" data-id="quiet">
-            Пауза<span>1 минута</span>
+            <span class="quick__icon quick__icon--cool" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M9.5 5.5v13" />
+                <path d="M14.5 5.5v13" />
+              </svg>
+            </span>
+            <span class="quick__label">${esc(QUICK_QUIET)}</span>
+            <span class="quick__meta">${esc(QUICK_QUIET_META)}</span>
+          </button>
+          <button class="quick__item" data-act="go" data-screen="contacts">
+            <span class="quick__icon quick__icon--rose" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path
+                  d="M21.5 16.9v2.6a2 2 0 0 1-2.2 2 19.6 19.6 0 0 1-8.5-3 19.3 19.3 0 0 1-6-6 19.6 19.6 0 0 1-3-8.6 2 2 0 0 1 2-2.2h2.6a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.6a2 2 0 0 1-.5 2.1L7.4 9.5a15.8 15.8 0 0 0 6.1 6.1l1.4-1.1a2 2 0 0 1 2.1-.5c.8.3 1.7.5 2.6.6a2 2 0 0 1 1.9 2.3z"
+                />
+              </svg>
+            </span>
+            <span class="quick__label">${esc(QUICK_CALL)}</span>
+            <span class="quick__meta">${esc(QUICK_CALL_META)}</span>
           </button>
         </div>
 
@@ -985,6 +1200,7 @@ const SCREENS = {
               <div class="card__meta">${b.cycles} цикла · ${b.phases
                 .map((p) => p.sec)
                 .join('–')}</div>
+              <span class="card__chev" aria-hidden="true">›</span>
             </button>`,
             )
             .join('')}
@@ -1023,7 +1239,7 @@ const SCREENS = {
           <div class="step__text">${esc(step.verb)}</div>
           <p class="muted small">${esc(step.hint)}</p>
           <button class="btn btn--primary" data-act="ground-next">
-            ${i === GROUNDING_STEPS.length - 1 ? 'Готово' : 'Нашла'}
+            ${i === GROUNDING_STEPS.length - 1 ? 'Готово' : 'Дальше'}
           </button>
         </div>
       </div>`;
@@ -1077,7 +1293,7 @@ const SCREENS = {
           <h1>Как сейчас?</h1>
         </header>
         <p class="lead">
-          Не обязательно стало лучше. Достаточно, что ты не осталась с этим одна.
+          Не обязательно стало лучше. Достаточно, что ты не остаёшься с этим наедине.
         </p>
         ${
           skill
@@ -1574,6 +1790,7 @@ const SCREENS = {
               <button class="card" data-act="go" data-screen="topic" data-id="${esc(tag)}">
                 <div class="card__title">${esc(tag)}</div>
                 <div class="card__meta">${esc(fill(TOPIC_COUNT, { n }))}</div>
+                <span class="card__chev" aria-hidden="true">›</span>
               </button>`,
                 )
                 .join('')
@@ -1631,19 +1848,6 @@ const SCREENS = {
     // здесь нет: на её телефоне он отвечает отказом независимо от типа файла.
     const copyPrimary = `<button class="btn btn--primary" data-act="export-copy-text">${esc(EXPORT_COPY_BUTTON)}</button>`;
     const download = `<button class="btn" data-act="export-download">${esc(EXPORT_DOWNLOAD_BUTTON)}</button>`;
-    const recentMode = featureOn('copyRecent');
-    const recent = recentMode && copyScope === 'recent';
-    const scope = recentMode
-      ? `
-      <div class="chips" role="group" aria-label="${esc(COPY_SCOPE_LABEL)}">
-        <button class="chip ${recent ? '' : 'on'}" data-act="copy-scope" data-scope="all">
-          ${esc(COPY_SCOPE_ALL)}
-        </button>
-        <button class="chip ${recent ? 'on' : ''}" data-act="copy-scope" data-scope="recent">
-          ${esc(COPY_SCOPE_RECENT)}
-        </button>
-      </div>`
-      : '';
     return `
       <div class="screen">
         <button class="back" data-act="back">‹ назад</button>
@@ -1657,10 +1861,9 @@ const SCREENS = {
 
         <section class="copy">
           <h2 class="copy__title">Копия</h2>
-          ${scope}
           ${copyPrimary}
           ${download}
-          <p class="hint">${esc(recent ? COPY_NOTE_RECENT : COPY_NOTE)}</p>
+          <p class="hint">${esc(COPY_NOTE)}</p>
         </section>
 
         <section class="copy">
@@ -1710,10 +1913,9 @@ const SCREENS = {
         </p>
         <p class="muted small">${esc(ABOUT_SCHEMA_NOTE)}</p>
         <p class="muted small">
-          Что появилось в этой версии: ветки «застряла» больше нет — она убрана.
-          В дневнике можно записать часы дневного сна, если он был.
-          У препарата бывает два приёма — утро и вечер, и отметка ставится на каждый.
-          112 остался на карточке и в контактах, но повторяющихся строк стало меньше.
+          Что появилось в этой версии: фразы близким можно править, а свою —
+          добавить и убрать. После перезапуска приложение возвращает туда,
+          где остановились, и не теряет начатую запись.
           Это не лечение, а способы пережить минуту.
         </p>
         <div class="note">
@@ -1741,6 +1943,7 @@ function skillCard(id, weak = false) {
       <div class="card__meta">${esc(s.meta)}</div>
       ${s.lead ? `<div class="card__lead">${esc(s.lead)}</div>` : ''}
       ${weak ? `<div class="card__weak">${esc(WEAK_LABEL)}</div>` : ''}
+      <span class="card__chev" aria-hidden="true">›</span>
     </button>`;
 }
 
@@ -1830,23 +2033,147 @@ function noOneBlock() {
     </section>`;
 }
 
+/**
+ * Встроенные фразы, которые вообще есть в этой сборке: три под флагом,
+ * шесть с ним. Скрытая фраза остаётся здесь — иначе её не вернуть.
+ */
+function baseMessages() {
+  return featureOn('messagesExtra') ? MESSAGES : MESSAGES.slice(0, 3);
+}
+
+/**
+ * Фразы, которые видно сейчас: встроенные (под флагом) с правками и свои.
+ * Список один для экрана и для копирования — иначе тап копировал бы
+ * исходный текст вместо исправленного.
+ */
+function visibleMessages() {
+  return messageList(baseMessages(), data.messages);
+}
+
+/** Текст ошибки правки по коду из messages.js. */
+function msgErrorText(code) {
+  if (code === MESSAGE_EMPTY) return MESSAGES_EMPTY;
+  if (code === MESSAGE_LONG) return MESSAGES_LONG.replace('{n}', MESSAGE_MAX);
+  if (code === MESSAGE_LIMIT) return MESSAGES_LIMIT.replace('{n}', OWN_MAX);
+  return '';
+}
+
+/** Поле правки: ввод живёт в msgText, как и текст письма в data.letter. */
+function bindMsgField() {
+  const field = document.getElementById('msg-text');
+  if (!field) return;
+  field.addEventListener('input', () => {
+    msgText = field.value;
+    msgError = '';
+  });
+}
+
+function focusMsgField() {
+  requestAnimationFrame(() => {
+    const field = document.getElementById('msg-text');
+    if (!field) return;
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+  });
+}
+
+/**
+ * Строка фразы: тап по тексту копирует, карандаш справа открывает правку.
+ * Раньше правка и удаление были подписями под текстом — карточка выглядела
+ * как форма. Карандаш — одна цель 44 px, подпись для чтения с экрана.
+ */
+const PENCIL = `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+  <path d="M4 20v-3.7L15.6 4.7a2.2 2.2 0 0 1 3.1 0l0.6 0.6a2.2 2.2 0 0 1 0 3.1L7.7 20H4Z" />
+  <path d="M14.4 5.9l3.7 3.7" />
+</svg>`;
+
+function msgRow(m) {
+  return `
+    <div class="msg">
+      <button class="msg__copy" data-act="copy" data-id="${esc(m.id)}">
+        ${
+          m.own
+            ? `<span class="msg__own">${esc(MESSAGES_OWN_LABEL)}</span>`
+            : `<span class="msg__label">${esc(m.label)}${
+                m.edited ? `<span class="msg__edited">${esc(MESSAGES_EDITED_LABEL)}</span>` : ''
+              }</span>`
+        }
+        <span class="msg__text">${esc(m.text)}</span>
+        <span class="msg__state" data-state="${esc(m.id)}"></span>
+      </button>
+      <button class="msg__act msg__act--icon" data-act="msg-edit" data-id="${esc(m.id)}"
+        aria-label="${esc(`${MESSAGES_EDIT}: ${m.own ? MESSAGES_OWN_LABEL : m.label}`)}">
+        ${PENCIL}
+      </button>
+    </div>`;
+}
+
+/**
+ * Правка: поле, потолок рядом и действия. «Удалить» есть у каждой фразы —
+ * своя исчезает совсем, встроенная прячется в данные и возвращается
+ * строкой под списком. «Вернуть как было» — только у изменённой.
+ * У новой фразы «Удалить» нет: удалять ещё нечего, поле закрывается
+ * «Отменой» (иначе это была бы кнопка, которая молча ничего не делает).
+ */
+function msgEditor(m) {
+  const title = m ? (m.own ? MESSAGES_OWN_LABEL : m.label) : MESSAGES_OWN_LABEL;
+  const id = m && !m.own ? ` data-id="${esc(m.id)}"` : '';
+  return `
+    <div class="msg msg--edit">
+      <div class="msg__label">${esc(title)}</div>
+      <label class="msg__editlabel" for="msg-text">${esc(MESSAGES_EDIT_LABEL)}</label>
+      <textarea id="msg-text" rows="3" maxlength="${MESSAGE_MAX}">${esc(msgText)}</textarea>
+      <p class="muted small msg__hintline">${
+        msgError ? esc(msgError) : esc(MESSAGES_MAX_HINT.replace('{n}', MESSAGE_MAX))
+      }</p>
+      <div class="msg__acts">
+        <button class="msg__act msg__act--main" data-act="msg-save">${esc(MESSAGES_SAVE)}</button>
+        <button class="msg__act" data-act="msg-cancel">${esc(MESSAGES_CANCEL)}</button>
+      </div>
+      ${
+        m
+          ? `<div class="msg__acts msg__acts--foot">
+               <button class="msg__act msg__act--danger"${id} data-act="msg-del">${esc(
+                 MESSAGES_DELETE,
+               )}</button>
+               ${
+                 m.edited
+                   ? `<button class="msg__act" data-act="msg-reset">${esc(MESSAGES_RESET)}</button>`
+                   : ''
+               }
+             </div>`
+          : ''
+      }
+    </div>`;
+}
+
 function messagesBlock() {
-  // Три новые фразы — за флагом: выключенный блок оставляет те три, что были.
-  const list = featureOn('messagesExtra') ? MESSAGES : MESSAGES.slice(0, 3);
+  const list = visibleMessages();
+  const editing = list.find((m) => m.id === msgEdit);
+  const hidden = hiddenBuiltins(baseMessages(), data.messages).length;
   return `
     <section class="msgs">
       <h2 class="msgs__title">${esc(MESSAGES_TITLE)}</h2>
       <p class="msgs__hint">${esc(MESSAGES_HINT)}</p>
       <div class="msgs__list">
-        ${list.map(
-          (m) => `
-          <button class="msg" data-act="copy" data-id="${m.id}">
-            <span class="msg__label">${esc(m.label)}</span>
-            <span class="msg__text">${esc(m.text)}</span>
-            <span class="msg__state" data-state="${m.id}"></span>
-          </button>`,
-        ).join('')}
+        ${list.map((m) => (msgEdit === m.id ? msgEditor(m) : msgRow(m))).join('')}
+        ${msgEdit === 'new' ? msgEditor(editing) : ''}
       </div>
+      ${
+        hidden
+          ? `<div class="msgs__hidden">
+               <span>${esc(MESSAGES_HIDDEN.replace('{n}', hidden))}</span>
+               <button class="msg__act" data-act="msg-restore">${esc(MESSAGES_HIDDEN_BACK)}</button>
+             </div>`
+          : ''
+      }
+      ${
+        msgEdit === 'new'
+          ? ''
+          : `<button class="msg__act msgs__add" data-act="msg-new">
+               <i aria-hidden="true">+</i>${esc(MESSAGES_ADD)}
+             </button>`
+      }
     </section>`;
 }
 
@@ -2036,6 +2363,9 @@ function applyPlainImport(text) {
   const merged = mergeData(data, parsed.data);
   const { fresh, existed } = importCounts(data, merged);
   data = merged;
+  // факт импорта — в журнал: по выгрузке видно, что копию принимали.
+  // Событие добавляется после слияния и уже не может быть в чужой копии.
+  journal('import_made');
   save();
   // старая копия могла принести прежние подписи 112 и линии МЧС
   migrateContactsAndSave();
@@ -2068,14 +2398,11 @@ async function pasteFromClipboard() {
 
 /**
  * Текст копии. Один и тот же для обоих путей наружу: файл и буфер.
- * В режиме «только записи за 14 дней» конверт тот же, а в данных нет
- * карточки, контактов, письма и препаратов — это режим «показать врачу».
- * Копия не зашифрована — так и подписана на экране.
+ * Копия одна — всё заполненное, включая журнал и память о навыках.
+ * Она не зашифрована — так и подписана на экране.
  */
 function buildCopy() {
-  return JSON.stringify(buildExport(data, SITE_VERSION, new Date(), {
-    entriesOnly: featureOn('copyRecent') && copyScope === 'recent',
-  }));
+  return JSON.stringify(buildExport(data, SITE_VERSION, new Date()));
 }
 
 /**
@@ -2151,12 +2478,10 @@ function debugBlock() {
 
 /** Текст копии в буфер: работает и там, где файл не уходит. */
 async function copyExportText() {
+  // копия собирается до записи о копии: иначе событие попало бы в неё же
   const ok = await copyText(buildCopy());
-  notice = ok
-    ? copyScope === 'recent'
-      ? EXPORT_COPY_DONE_RECENT
-      : EXPORT_COPY_DONE
-    : EXPORT_COPY_FAILED;
+  notice = ok ? EXPORT_COPY_DONE : EXPORT_COPY_FAILED;
+  if (ok) journal('export_made');
   render();
 }
 
@@ -2171,6 +2496,7 @@ function downloadCopy() {
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
     notice = EXPORT_DONE;
+    journal('export_made');
   } catch {
     notice = EXPORT_FAILED;
   }
@@ -2182,6 +2508,18 @@ function downloadCopy() {
 /* ------------------------------------------------------------------ */
 
 const MOUNT = {
+  /**
+   * Поле правки фразы: текст держим в msgText, а не в DOM — экран
+   * перерисовывается на каждое действие, и ввод иначе пропадал бы.
+   */
+  home() {
+    bindMsgField();
+  },
+
+  contacts() {
+    bindMsgField();
+  },
+
   breath(id) {
     if (!id || !BREATHS[id]) return;
     startBreath(id);
@@ -2220,10 +2558,14 @@ const MOUNT = {
   },
 
   diary() {
+    // Ввод сразу уходит в данные: перезапуск страницы не должен уносить
+    // набранное. Поле записи — не черновик «на потом», а та же запись,
+    // которую человек уже начал, поэтому цена сохранения того стоит.
     const note = document.getElementById('note');
     if (note) {
       note.addEventListener('input', () => {
         draft.note = note.value;
+        saveDraft();
       });
     }
     // сон — необязательное поле: оно не подсвечивается и ничего не требует
@@ -2231,12 +2573,14 @@ const MOUNT = {
     if (sleep) {
       sleep.addEventListener('input', () => {
         draft.sleepH = sleep.value;
+        saveDraft();
       });
     }
     const napH = document.getElementById('sleep-nap-h');
     if (napH) {
       napH.addEventListener('input', () => {
         draft.napH = napH.value;
+        saveDraft();
       });
     }
   },
@@ -2441,6 +2785,12 @@ document.addEventListener('click', async (e) => {
         medEdit = null;
         medDraft = null;
       }
+      // правка фразы живёт только там, где фразы видны: ушли — она закрыта
+      if (!['home', 'contacts'].includes(el.dataset.screen)) {
+        msgEdit = null;
+        msgText = '';
+        msgError = '';
+      }
       if (el.dataset.screen === 'home' || el.dataset.screen === 'triage') skillCtx = null;
       // вошли в навык — после него спросим «помогло?» именно про него
       if (el.dataset.screen === 'skill') skillCtx = id;
@@ -2505,9 +2855,11 @@ document.addEventListener('click', async (e) => {
     /* -------------------------- сообщения ------------------------ */
 
     case 'copy': {
-      const msg = MESSAGES.find((m) => m.id === id);
+      // копируется то, что видно: исправленная или своя фраза, а не исходник
+      const msg = visibleMessages().find((m) => m.id === id);
       if (!msg) break;
       const ok = await copyText(msg.text);
+      if (ok) journal('message_copy', { id: msg.id });
       const state = el.querySelector('.msg__state');
       if (state) {
         state.textContent = ok ? MESSAGES_COPIED : MESSAGES_FAILED;
@@ -2515,6 +2867,105 @@ document.addEventListener('click', async (e) => {
           if (state.isConnected) state.textContent = '';
         }, 2500);
       }
+      break;
+    }
+
+    /* --------------------- правка фраз близким ------------------- */
+
+    case 'msg-edit': {
+      const msg = visibleMessages().find((m) => m.id === id);
+      if (!msg) break;
+      msgEdit = msg.id;
+      msgText = msg.text;
+      msgError = '';
+      render();
+      focusMsgField();
+      break;
+    }
+
+    case 'msg-new':
+      if (ownFull(data.messages)) {
+        notice = msgErrorText(MESSAGE_LIMIT);
+        render();
+        break;
+      }
+      msgEdit = 'new';
+      msgText = '';
+      msgError = '';
+      notice = '';
+      render();
+      focusMsgField();
+      break;
+
+    case 'msg-cancel':
+      msgEdit = null;
+      msgText = '';
+      msgError = '';
+      render();
+      break;
+
+    case 'msg-save': {
+      if (msgEdit === null) break;
+      const now = Date.now();
+      // «Сохранить» без единой правки — не правка: фраза остаётся
+      // встроенной, и «изменено» не появляется из ниоткуда.
+      const raw = baseMessages().find((m) => m.id === msgEdit);
+      const sameAsBuiltin = Boolean(raw) && raw.text.trim() === msgText.trim();
+      const result =
+        msgEdit === 'new'
+          ? addOwn(data.messages, msgText, now)
+          : sameAsBuiltin
+            ? { ok: true, messages: resetBuiltin(data.messages, msgEdit, now) }
+            : saveBuiltin(data.messages, msgEdit, msgText, now);
+      if (!result.ok) {
+        // отказ не закрывает поле: текст остаётся, причина — рядом
+        msgError = msgErrorText(result.error);
+        render();
+        focusMsgField();
+        break;
+      }
+      data.messages = result.messages;
+      msgEdit = null;
+      msgText = '';
+      msgError = '';
+      save();
+      render();
+      break;
+    }
+
+    case 'msg-del': {
+      // «Удалить» живёт только в правке. Своя фраза исчезает совсем,
+      // встроенная прячется: её текст остаётся в коде и возвращается
+      // строкой «Скрытых фраз».
+      if (msgEdit === null) break;
+      if (msgEdit !== 'new') data.messages = removeMessage(data.messages, msgEdit, Date.now());
+      msgEdit = null;
+      msgText = '';
+      msgError = '';
+      save();
+      render();
+      break;
+    }
+
+    case 'msg-reset': {
+      if (!msgEdit || msgEdit === 'new') break;
+      data.messages = resetBuiltin(data.messages, msgEdit, Date.now());
+      msgEdit = null;
+      msgText = '';
+      msgError = '';
+      save();
+      render();
+      break;
+    }
+
+    case 'msg-restore': {
+      // Вернуть все скрытые разом: список открывается в трудную минуту,
+      // разбираться по одной в нём не с руки.
+      const ids = hiddenBuiltins(baseMessages(), data.messages).map((m) => m.id);
+      if (!ids.length) break;
+      data.messages = restoreHidden(data.messages, ids, Date.now());
+      save();
+      render();
       break;
     }
 
@@ -2530,6 +2981,7 @@ document.addEventListener('click', async (e) => {
         draft.helped.push(id);
         draft.helpedAt[id] = now;
       }
+      data.draft = draftSnapshot();
       save();
       skillCtx = null;
       current = { name: 'done', id: null };
@@ -2564,6 +3016,7 @@ document.addEventListener('click', async (e) => {
       }
       data.cardTs = Date.now();
       save();
+      journal('card_saved');
       cardEdit = false;
       render();
       break;
@@ -2610,9 +3063,13 @@ document.addEventListener('click', async (e) => {
         const i = Number(inp.dataset.i);
         if (next[i]) next[i][inp.dataset.c] = inp.value.trim();
       });
+      // «добавил свой номер» — это действие; чем чаще звонили по нему —
+      // не пишем никогда, и текст контакта в журнал не попадает.
+      const was = data.contacts.filter((c) => c.label || c.phone).length;
       data.contacts = next.filter((c) => c.label || c.phone);
       data.contactsTs = Date.now();
       save();
+      if (data.contacts.length > was) journal('contact_added');
       contactsEdit = false;
       render();
       break;
@@ -2632,6 +3089,7 @@ document.addEventListener('click', async (e) => {
 
     case 'mood':
       draft.mood = Number(el.dataset.v);
+      saveDraft();
       render();
       break;
 
@@ -2639,6 +3097,7 @@ document.addEventListener('click', async (e) => {
       const t = el.dataset.tag;
       if (draft.tags.has(t)) draft.tags.delete(t);
       else draft.tags.add(t);
+      saveDraft();
       render();
       break;
     }
@@ -2648,6 +3107,7 @@ document.addEventListener('click', async (e) => {
       draft.nap = !draft.nap;
       // выключили — блок исчез, и часы дня больше не утверждение
       if (!draft.nap) draft.napH = '';
+      saveDraft();
       render();
       break;
 
@@ -2685,17 +3145,12 @@ document.addEventListener('click', async (e) => {
       }
 
       data.entries.push(entry);
+      // запись сохранена — черновик очищается, и очистка старше прежнего
+      // черновика: иначе вторая копия вернула бы набранное
+      clearDraft();
       save();
-      draft = {
-        mood: null,
-        tags: new Set(),
-        note: '',
-        helped: [],
-        helpedAt: {},
-        sleepH: '',
-        nap: false,
-        napH: '',
-      };
+      // только факт: ни настроения, ни меток, ни заметки в журнале нет
+      journal('entry_saved');
       render();
       break;
     }
@@ -2708,6 +3163,7 @@ document.addEventListener('click', async (e) => {
     case 'draft-unhelp':
       draft.helped = draft.helped.filter((x) => x !== id);
       delete draft.helpedAt[id];
+      saveDraft();
       render();
       break;
 
@@ -2726,6 +3182,8 @@ document.addEventListener('click', async (e) => {
         Date.now(),
       );
       save();
+      // id препарата — обезличенный ключ («m1c3…»): названия в журнале нет
+      journal('mark_set', { id: el.dataset.med });
       render();
       break;
 
@@ -2792,13 +3250,14 @@ document.addEventListener('click', async (e) => {
         break;
       }
       const ts = Date.now();
+      const medId = medEdit === 'new' ? 'm' + ts.toString(36) : medEdit;
       // «Утром и вечером» — только у регулярного приёма. У «по необходимости»
       // отметок нет, поэтому и приёмов в данных нет.
       const slots =
         medMode === 'regular' && medSlots === 'twice' ? ['morning', 'evening'] : [];
       if (medEdit === 'new') {
         data.meds.push({
-          id: 'm' + ts.toString(36),
+          id: medId,
           name,
           changes: [{ d, how }],
           mode: medMode,
@@ -2827,6 +3286,8 @@ document.addEventListener('click', async (e) => {
       medDraft = null;
       notice = '';
       save();
+      // название препарата и доза в журнал не идут: только id и факт
+      journal('med_change', { id: medId });
       render();
       break;
     }
@@ -2838,6 +3299,7 @@ document.addEventListener('click', async (e) => {
         m.stoppedAt = dayKey();
         m.ts = Date.now();
         save();
+        journal('med_change', { id });
       }
       render();
       break;
@@ -2849,6 +3311,7 @@ document.addEventListener('click', async (e) => {
         m.stoppedAt = '';
         m.ts = Date.now();
         save();
+        journal('med_change', { id });
       }
       render();
       break;
@@ -2884,15 +3347,6 @@ document.addEventListener('click', async (e) => {
 
     case 'export-copy-text':
       await copyExportText();
-      break;
-
-    // что в копии: всё или только записи дневника за 14 дней.
-    // Переключение только перерисовывает «Ещё»: данные не трогаются.
-    case 'copy-scope':
-      if (!featureOn('copyRecent')) break;
-      copyScope = el.dataset.scope === 'recent' ? 'recent' : 'all';
-      notice = '';
-      render();
       break;
 
     // восстановление текстом: буфер, а если не дал — поле для вставки
@@ -2998,7 +3452,40 @@ async function promptInstall() {
 
 // Первый экран заменяет запись, а не добавляет новую: иначе первый жест
 // «назад» возвращал бы на тот же экран и приложение не закрывалось бы.
-window.history.replaceState(stateOf(current), '');
+//
+// Перезапуск страницы (обновление service worker, возврат в приложение,
+// перезагрузка вкладки) начинается с нового документа: память экрана
+// не переживает его, поэтому место запоминается в данных. Возвращаемся
+// на целый экран, а не в середину действия: сессию дыхания, таймер,
+// шаг развилки и открытую форму не восстанавливаем.
+const resumed = (() => {
+  const saved = data.resume;
+  if (!saved || !saved.ts) return null;
+  const screen = resumeScreen(saved.name, saved.id);
+  if (!screen) return null;
+  if (screen.name === 'skill' && !SKILLS[screen.id]) return null;
+  return screen;
+})();
+
+if (resumed) {
+  current = resumed;
+  // восстановленный экран — не действие человека: журнал его не пишет,
+  // а сессия навыка не начинается заново с перезагрузки
+  shown = { name: current.name, id: current.id ?? null };
+  if (isTabRoot(resumed.name, resumed.id)) {
+    window.history.replaceState(stateOf(current), '');
+  } else {
+    // Экран внутри без записи в истории оставил бы «‹ назад» без адреса:
+    // под ним кладём ту вкладку, откуда такие экраны открываются.
+    const parent = resumeParent(resumed.name);
+    nav = [parent];
+    window.history.replaceState(stateOf(parent), '');
+    window.history.pushState(stateOf(current), '');
+  }
+  activeTab = TAB_OF[current.name] ?? TAB_OF[resumeParent(current.name).name] ?? 'home';
+} else {
+  window.history.replaceState(stateOf(current), '');
+}
 
 render();
 

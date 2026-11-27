@@ -3,12 +3,22 @@
   --surface: #172025;
   --surface-2: #1f2a30;
   --line: #263239;
+  /* Рамка нажимаемого блока светлее обычной линии: карточка-кнопка должна
+     отличаться от информационного блока, который теперь плоский. */
+  --line-strong: #35474f;
   --text: #e9efef;
   --muted: #90a2a3;
   --accent: #6fc3b0;
   --accent-soft: #2c4a46;
   --warm: #e3b183;
   --danger: #e28a7a;
+  /* Четвёртый цвет — только для значка «Пауза»: тёплый и мятный уже заняты
+     двумя другими быстрыми действиями, а третий серый вернул бы плитки
+     к одному виду. */
+  --cool: #9db4d6;
+  /* Пятый цвет — только для «Позвонить»: у остальных трёх плиток уже
+     свои, а повтор означал бы «это то же самое». */
+  --rose: #c9a2b4;
 
   --radius: 18px;
   --pad: 20px;
@@ -200,13 +210,21 @@ button {
   margin-bottom: 20px;
 }
 
+/* Значок в цветном круге: четыре быстрых действия перестают быть
+   одинаковыми серыми плитками. Цвет — только у значка, текст остаётся
+   читаемым на тёмном. */
 .quick__item {
-  padding: 16px 14px;
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  column-gap: 11px;
+  align-items: center;
+  padding: 15px 14px;
   border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
   font-size: 15px;
   line-height: 1.3;
+  text-align: left;
   /* Причина прежних 15 px вбок: «Заземление» при 200 % шире колонки 155 px
      и не переносилось. anywhere (а не break-word) ещё и уменьшает
      min-content, поэтому колонка сетки не растягивается под слово. */
@@ -214,15 +232,59 @@ button {
   overflow-wrap: anywhere;
 }
 
-.quick__item:active {
-  background: var(--surface-2);
+.quick__icon {
+  grid-row: 1 / span 2;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
 }
 
-.quick__item span {
-  display: block;
+.quick__icon svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.quick__icon--mint {
+  background: rgba(111, 195, 176, 0.14);
+  color: var(--accent);
+}
+
+.quick__icon--warm {
+  background: rgba(227, 177, 131, 0.14);
+  color: var(--warm);
+}
+
+.quick__icon--cool {
+  background: rgba(157, 180, 214, 0.14);
+  color: var(--cool);
+}
+
+.quick__icon--rose {
+  background: rgba(201, 162, 180, 0.14);
+  color: var(--rose);
+}
+
+.quick__item:active {
+  background: var(--surface);
+  border-color: var(--accent-soft);
+}
+
+.quick__label {
+  align-self: end;
+}
+
+.quick__meta {
+  align-self: start;
   color: var(--muted);
   font-size: 12px;
-  margin-top: 3px;
+  margin-top: 2px;
 }
 
 .btn {
@@ -231,7 +293,7 @@ button {
   padding: 16px 18px;
   border-radius: 14px;
   background: var(--surface-2);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   font-size: 16px;
   font-weight: 500;
   text-align: center;
@@ -294,13 +356,14 @@ button {
   gap: 12px;
   padding: 19px 18px;
   border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
   font-size: 16px;
 }
 
 .grid__btn:active {
-  background: var(--surface-2);
+  background: var(--surface);
+  border-color: var(--accent-soft);
 }
 
 .grid__btn::after {
@@ -310,18 +373,45 @@ button {
   line-height: 1;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Что нажимается и что просто читается                               */
+/* ------------------------------------------------------------------ */
+
+/* Одно правило на всё приложение.
+   Нажимаемое — плитка: светлый фон (--surface-2), полная рамка
+   (--line-strong), реакция на нажатие, у перехода ещё и шеврон «›».
+   Информация — плоская: без полной рамки, с цветной чертой слева
+   и лёгкой подложкой. Раньше «Мне плохо сейчас» (кнопка) и «Здесь
+   можно ничего не делать» (просто текст) выглядели одинаково, и было
+   непонятно, куда нажимать. */
+
+/* Переход вглубь: карточка-кнопка со шевроном справа. */
 .card {
+  position: relative;
   display: block;
   width: 100%;
   padding: 18px;
+  /* Место под шеврон: текст под него не заходит. */
+  padding-right: 46px;
   border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
   margin-bottom: 10px;
 }
 
+.card__chev {
+  position: absolute;
+  right: 15px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+}
+
 .card:active {
-  background: var(--surface-2);
+  background: var(--surface);
+  border-color: var(--accent-soft);
 }
 
 .card__title {
@@ -342,22 +432,17 @@ button {
   line-height: 1.45;
 }
 
-.note {
-  padding: 16px 18px;
-  border-radius: var(--radius);
-  background: rgba(227, 177, 131, 0.07);
-  border: 1px solid rgba(227, 177, 131, 0.17);
-  color: #dcc7b1;
-  font-size: 14px;
-  line-height: 1.55;
-}
+/* Второго правила .note здесь больше нет: раньше этот же селектор был
+   объявлен дважды (тёплая плашка и спокойная), и побеждало второе —
+   первое было мёртвым кодом. Осталось одно, ниже, у экрана дыхания. */
 
 .caution {
   margin-top: 20px;
-  padding: 14px 16px;
-  border-radius: 14px;
-  background: rgba(226, 138, 122, 0.09);
-  border: 1px solid rgba(226, 138, 122, 0.24);
+  padding: 12px 14px;
+  border-radius: 0 12px 12px 0;
+  background: rgba(226, 138, 122, 0.08);
+  border: 0;
+  border-left: 3px solid rgba(226, 138, 122, 0.6);
   color: #f0b7ad;
   font-size: 14px;
   line-height: 1.45;
@@ -365,6 +450,9 @@ button {
 
 .safety {
   margin-top: 28px;
+  /* Строка «это не терапия» отделена линией сверху; снизу нужен воздух —
+     иначе быстрые действия и кнопка приёма прилипают к предупреждению. */
+  margin-bottom: 14px;
   padding-top: 16px;
   border-top: 1px solid var(--line);
   color: var(--muted);
@@ -373,16 +461,23 @@ button {
 }
 
 /* Подсказка, которую надо прочитать до действий: пик паники, ожидания
-   от препаратов. Не тревожная рамка (.caution), а спокойная плашка. */
+   от препаратов. Не тревожная рамка (.caution), а спокойная плашка:
+   плоская, с чертой слева — это текст, а не кнопка. */
 .note {
   margin-top: 20px;
-  padding: 14px 16px;
-  border-radius: 14px;
-  background: var(--surface);
-  border: 1px solid var(--line);
+  padding: 12px 14px;
+  border-radius: 0 12px 12px 0;
+  background: rgba(111, 195, 176, 0.05);
+  border: 0;
+  border-left: 3px solid rgba(111, 195, 176, 0.45);
   color: var(--text);
   font-size: 14px;
   line-height: 1.5;
+}
+
+/* На экране дыхания плашка стоит прямо над первой карточкой и липла к ней. */
+.note + .card {
+  margin-top: 12px;
 }
 
 /* ------------------------------------------------------------------ */
@@ -581,7 +676,14 @@ input[type='password'] {
 }
 
 textarea {
+  display: block;
   min-height: 96px;
+}
+
+/* Поле заметки стоит после блока сна и «что помогло»: без отступа оно
+   прилипало к строке часов (4 px) — на 320 px это читалось как одно поле. */
+#note {
+  margin-top: 12px;
 }
 
 #letter {
@@ -602,11 +704,15 @@ input::placeholder {
   color: #7a8d8f;
 }
 
+/* Информация на карточке и первое имя: то же правило — плоский блок
+   с чертой слева, а не плитка. Плитка здесь означала бы «нажми меня»,
+   хотя нажимается только «Заполнить» ниже. */
 .field-block {
-  padding: 16px 17px;
-  border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--line);
+  padding: 12px 14px;
+  border-radius: 0 12px 12px 0;
+  background: rgba(111, 195, 176, 0.05);
+  border: 0;
+  border-left: 3px solid rgba(111, 195, 176, 0.45);
   margin-bottom: 12px;
 }
 
@@ -632,10 +738,11 @@ input::placeholder {
 /* Первое имя из «кому я могу позвонить» — крупно, как «кому звонить первым».
    Это имя, а не номер: строка не звонит и не обещает, что человек ответит. */
 .firstcall {
-  padding: 16px 17px;
-  border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--line);
+  padding: 14px 16px;
+  border-radius: 0 12px 12px 0;
+  background: rgba(227, 177, 131, 0.06);
+  border: 0;
+  border-left: 3px solid rgba(227, 177, 131, 0.5);
   margin-bottom: 12px;
 }
 
@@ -652,6 +759,8 @@ input::placeholder {
   display: inline-flex;
   align-items: center;
   min-height: 44px;
+  /* Строка 112 стоит над первым полем карточки и вплотную к нему липла. */
+  margin-bottom: 10px;
   color: var(--accent);
   font-size: 15px;
   text-decoration: underline;
@@ -676,15 +785,16 @@ input::placeholder {
   gap: 14px;
   padding: 16px 17px;
   border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
   margin-bottom: 10px;
   text-decoration: none;
   color: inherit;
 }
 
 .contact:active {
-  background: var(--surface-2);
+  background: var(--surface);
+  border-color: var(--accent-soft);
 }
 
 .contact__body {
@@ -1294,19 +1404,66 @@ input::placeholder {
   gap: 10px;
 }
 
+/* Карточка фразы: текст копируется тапом, правка — карандашом справа.
+   Раньше вся карточка была кнопкой, потом под текстом стояли подписи;
+   теперь карточка — контейнер, копирование на .msg__copy, а действия
+   открываются в правке. */
 .msg {
+  position: relative;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  overflow: hidden;
+}
+
+.msg__copy {
   display: block;
   width: 100%;
   min-height: 56px;
-  padding: 15px 17px;
-  border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--line);
+  /* Справа место под карандаш 44 px + 8 px отступа: текст под ним
+     не оказывается ни на одной ширине. */
+  padding: 15px 60px 15px 17px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  font: inherit;
   text-align: left;
 }
 
-.msg:active {
-  background: var(--surface-2);
+.msg__copy:active {
+  background: var(--surface);
+}
+
+/* Карандаш: маленький значок, но цель — 44 × 44, как у остальных. */
+.msg__act--icon {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.msg__act--icon svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.msg__act--icon:active {
+  background: var(--surface);
+  color: var(--text);
 }
 
 .msg__label {
@@ -1333,6 +1490,123 @@ input::placeholder {
 
 .msg__state:not(:empty) {
   margin-top: 6px;
+}
+
+/* «своя фраза» вместо готовой подписи: у своих подписи нет */
+.msg__own {
+  display: block;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  color: var(--warm);
+  margin-bottom: 2px;
+}
+
+/* «изменено» рядом с подписью: видно, что фраза не заводская */
+.msg__edited {
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: var(--warm);
+}
+
+.msg__acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+/* Цель нажатия — не меньше 44 px: те же правила, что у .chip. */
+.msg__act {
+  min-height: 44px;
+  padding: 8px 13px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.msg__act--main {
+  background: var(--accent-soft);
+  border-color: #3d6a62;
+  color: #cdeee5;
+}
+
+.msg__act:active {
+  background: var(--surface);
+}
+
+/* Удаление стоит отдельно от «Сохранить»: у него свой цвет, и оно
+   не должно попадаться под палец рядом с главной кнопкой. */
+.msg__act--danger {
+  color: var(--danger);
+  border-color: rgba(226, 138, 122, 0.35);
+}
+
+/* «Добавить свою фразу» — тоже цель 44 px, но на всю ширину.
+   Раньше кнопка была прозрачной с тонкой рамкой и читалась как пустое
+   поле ввода. Теперь это пунктирная плитка с плюсом: «сюда добавляют»,
+   а не «сюда печатают». */
+.msgs__add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 10px;
+  padding-left: 14px;
+  background: rgba(111, 195, 176, 0.06);
+  border: 1px dashed rgba(111, 195, 176, 0.5);
+  color: var(--accent);
+  font-size: 15px;
+}
+
+.msgs__add i {
+  font-style: normal;
+  font-size: 19px;
+  line-height: 1;
+  color: var(--accent);
+}
+
+/* Скрытые встроенные фразы: одна строка с числом и возвратом. */
+.msgs__hidden {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.msgs__hidden .msg__act {
+  min-height: 44px;
+  flex: 0 0 auto;
+}
+
+.msg--edit {
+  padding: 14px 14px 4px;
+}
+
+.msg--edit .msg__acts {
+  padding: 0 0 10px;
+}
+
+.msg--edit textarea {
+  width: 100%;
+}
+
+.msg__editlabel {
+  display: block;
+  margin: 8px 0 6px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.msg__hintline {
+  margin: 6px 0 10px;
 }
 
 /* ------------------------------------------------------------------ */

@@ -37,8 +37,6 @@ export const FEATURES = {
   panicNote: true,
   // 4.10 — ожидания и границы на экране приёма
   medsExpect: true,
-  // 4.11 — копия «только записи за 14 дней»
-  copyRecent: true,
 };
 
 export function featureOn(name) {

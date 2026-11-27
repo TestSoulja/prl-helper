@@ -17,6 +17,9 @@
  * в черновике и в хранилище не попадает.
  */
 
+import { normalizeMessages, mergeMessages } from './messages.js';
+import { normalizeEvents, mergeEvents, exportEvents, journalSummary } from './events.js';
+
 export const APP = 'opora';
 
 // Версия формата данных и файла копии. Меняется только при несовместимой
@@ -63,6 +66,10 @@ const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const obj = (v) => (v !== null && typeof v === 'object' && !Array.isArray(v) ? v : null);
 
 const txt = (v) => (typeof v === 'string' ? v : '');
+
+// Число из поля ввода хранится строкой как ввёл человек; число из чужой
+// копии читается так же, а не выбрасывается.
+const strOf = (v) => (typeof v === 'number' ? String(v) : txt(v));
 
 /** Номер схемы в данных: нет поля или мусор — считаем первой схемой. */
 export function schemaOf(raw) {
@@ -220,10 +227,62 @@ function toMark(k) {
 }
 
 /**
+ * Пустой черновик записи. Одна форма на всё приложение: `app.js` собирает
+ * такой же объект, когда запись сохранена или стёрта.
+ *
+ * Черновик живёт в тех же данных (`opora.v1`), потому что перезапуск
+ * страницы не должен уносить набранное молча. В копию он не попадает:
+ * это состояние экрана, а не записи (см. buildExport).
+ */
+export function emptyDraft() {
+  return {
+    mood: null,
+    tags: [],
+    note: '',
+    helped: [],
+    helpedAt: {},
+    sleepH: '',
+    nap: false,
+    napH: '',
+    ts: 0,
+  };
+}
+
+/** Последний открытый экран. Одно поле: имя, id и время. */
+export function emptyResume() {
+  return { name: '', id: null, ts: 0 };
+}
+
+function toDraft(raw) {
+  const d = obj(raw);
+  if (!d) return emptyDraft();
+  const mood = num(d.mood);
+  return {
+    ...d,
+    mood: Number.isInteger(mood) && mood >= 1 && mood <= 5 ? mood : null,
+    tags: Array.isArray(d.tags) ? d.tags.filter((t) => typeof t === 'string' && t.trim()) : [],
+    note: txt(d.note),
+    helped: helpedList(d.helped),
+    helpedAt: obj(d.helpedAt) ? { ...d.helpedAt } : {},
+    sleepH: strOf(d.sleepH),
+    nap: d.nap === true,
+    napH: strOf(d.napH),
+    ts: num(d.ts),
+  };
+}
+
+function toResume(raw) {
+  const r = obj(raw);
+  if (!r) return emptyResume();
+  return { ...r, name: txt(r.name), id: txt(r.id) || null, ts: num(r.ts) };
+}
+
+/**
  * Приводит любые прочитанные данные к известной форме. Не меняет вход.
  * Это именно приведение типов, а не миграция: неизвестные поля остаются
- * на всех уровнях (верхний, card, записи, контакты, help[id], препараты),
- * иначе копия из будущей версии потеряла бы данные при следующем сохранении.
+ * на всех уровнях (верхний, card, записи, контакты, help[id], препараты,
+ * фразы близким), иначе копия из будущей версии потеряла бы данные при
+ * следующем сохранении.
  */
 export function normalize(raw) {
   const src = obj(raw) || {};
@@ -249,6 +308,16 @@ export function normalize(raw) {
     entries,
     meds: Array.isArray(src.meds) ? src.meds.filter(obj).map(toMed) : [],
     marks: Array.isArray(src.marks) ? src.marks.filter(obj).map(toMark) : [],
+    // 0.10.0, схема остаётся 4: необязательные ключи. Пустые значения —
+    // это «ничего не набрано» и «экран не запоминали», а не выдуманные данные.
+    messages: normalizeMessages(src.messages),
+    draft: toDraft(src.draft),
+    resume: toResume(src.resume),
+    // 0.11.0, схема остаётся 4: журнал — необязательный ключ. Пустой
+    // список — это «ничего не делали», а не выдуманные события;
+    // eventsDropped помнит, сколько старых ушло за потолок 5 000.
+    events: normalizeEvents(src.events),
+    eventsDropped: num(src.eventsDropped),
     letter: txt(src.letter),
     letterTs: num(src.letterTs),
     help,
@@ -423,6 +492,24 @@ function pickLetter(a, b) {
   return num(b.letterTs) > num(a.letterTs) ? b : a;
 }
 
+/**
+ * Черновик и последний экран — тоже по свежему `ts`. Пустое время значит
+ * «не было», и тогда живая копия побеждает: свежая правка на одном
+ * устройстве не должна проигрывать пустоте на другом.
+ * Равное время — остаётся первая (своя) копия.
+ */
+function pickDraft(a, b) {
+  if (!num(a.draft?.ts)) return b.draft;
+  if (!num(b.draft?.ts)) return a.draft;
+  return num(b.draft.ts) > num(a.draft.ts) ? b.draft : a.draft;
+}
+
+function pickResume(a, b) {
+  if (!num(a.resume?.ts)) return b.resume;
+  if (!num(b.resume?.ts)) return a.resume;
+  return num(b.resume.ts) > num(a.resume.ts) ? b.resume : a.resume;
+}
+
 const KNOWN_FIELDS = new Set([
   'schema',
   'card',
@@ -432,6 +519,11 @@ const KNOWN_FIELDS = new Set([
   'entries',
   'meds',
   'marks',
+  'messages',
+  'draft',
+  'resume',
+  'events',
+  'eventsDropped',
   'letter',
   'letterTs',
   'help',
@@ -465,6 +557,10 @@ export function mergeData(a, b) {
   const card = pickCard(A, B);
   const contacts = pickContacts(A, B);
   const letter = pickLetter(A, B);
+  // журнал: объединение по (t, kind, id) без дублей, потолок — после
+  // слияния. Число отброшенных не складываем: две копии одного журнала
+  // удвоили бы его, поэтому берём большее и прибавляем ушедшее сейчас.
+  const journal = mergeEvents(A.events, B.events);
 
   return {
     ...mergeUnknown(A, B),
@@ -478,6 +574,11 @@ export function mergeData(a, b) {
     entries: mergeEntries(A.entries, B.entries),
     meds: mergeMeds(A.meds, B.meds),
     marks: mergeMarks(A.marks, B.marks),
+    messages: mergeMessages(A.messages, B.messages),
+    draft: { ...pickDraft(A, B) },
+    resume: { ...pickResume(A, B) },
+    events: journal.events,
+    eventsDropped: Math.max(num(A.eventsDropped), num(B.eventsDropped)) + journal.trimmed,
     letter: letter.letter,
     letterTs: Math.max(A.letterTs, B.letterTs),
     help: mergeHelp(A.help, B.help),
@@ -485,7 +586,7 @@ export function mergeData(a, b) {
   };
 }
 
-/** Есть ли что терять: заполненная карточка, записи, письмо, оценки, приём. */
+/** Есть ли что терять: карточка, записи, письмо, оценки, приём, журнал. */
 export function isDataEmpty(raw) {
   const d = normalize(raw);
   return (
@@ -493,6 +594,7 @@ export function isDataEmpty(raw) {
     d.entries.length === 0 &&
     d.meds.length === 0 &&
     d.marks.length === 0 &&
+    d.events.length === 0 &&
     d.letter.trim() === '' &&
     Object.values(d.help).every((c) => totalOf(c) === 0)
   );
@@ -507,39 +609,33 @@ export function exportName(date = new Date()) {
 /**
  * Содержимое файла копии. Номер схемы стоит и в конверте, и в данных:
  * конверт читает эта версия, данные — любая, кому файл достанется.
+ *
+ * Копия одна: всё, что заполнено, включая журнал и память о навыках.
+ * Второго режима «только записи за 14 дней» больше нет (0.11.0).
  */
-export function buildExport(raw, version, date = new Date(), { entriesOnly = false } = {}) {
+export function buildExport(raw, version, date = new Date()) {
   const m = migrate(raw);
-  const data = m.data;
-  // Копия «только записи за 14 дней»: тот же конверт, та же схема, но в данных
-  // нет ни карточки, ни контактов, ни письма, ни препаратов с отметками.
-  // Пустые блоки и нулевые отметки времени нужны явно: без них `help`
-  // и `cardTs`/`contactsTs`/`letterTs` уезжали из полной копии, хотя подпись
-  // обещает «только записи дневника». Слияние при импорте устроено так, что
-  // пустые списки и старые отметки времени ничего не стирают.
-  const subset = entriesOnly
-    ? {
-        ...data,
-        card: {},
-        contacts: [],
-        letter: '',
-        meds: [],
-        marks: [],
-        help: {},
-        cardTs: 0,
-        contactsTs: 0,
-        letterTs: 0,
-        entries: [...data.entries]
-          .sort((a, b) => Number(a.t || 0) - Number(b.t || 0))
-          .slice(-14),
-      }
-    : data;
+  // Черновик записи и последний открытый экран — состояние этого телефона,
+  // а не записи. В копию они не попадают: иначе в переписке оказался бы
+  // недописанный текст, о котором никто не просил.
+  const data = {
+    ...m.data,
+    draft: emptyDraft(),
+    resume: emptyResume(),
+    // Взгляд (открыл и вышел раньше 10 с) остаётся в сырье, но в копию
+    // не идёт: это не попытка, и в выгрузке он был бы шумом.
+    events: exportEvents(m.data.events),
+  };
   return {
     app: APP,
     schema: m.schema,
     version: String(version),
     exportedAt: date.toISOString(),
-    data: subset,
+    // С какого события начинается журнал и сколько старых отброшено:
+    // без этой строки выгрузка выглядела бы полной, даже когда начало
+    // уже потеряно за потолком 5 000.
+    journal: journalSummary(m.data.events, m.data.eventsDropped),
+    data,
   };
 }
 

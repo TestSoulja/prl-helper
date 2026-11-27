@@ -71,3 +71,45 @@ export function historyPlan(step, stack) {
 
 /** То, что кладётся в window.history: только экран, ничего личного. */
 export const stateOf = (screen) => ({ opora: { screen: screen.name, id: screen.id ?? null } });
+
+/**
+ * Какие экраны переживают перезапуск страницы.
+ *
+ * Это не «любой экран, где человек был»: дыхательная сессия, таймер,
+ * «побыть», шаг развилки и форма правки — состояния, а не место.
+ * Восстанавливать их значило бы открыть приложение посреди чужого действия.
+ * Поэтому список короткий: целые экраны, у которых нет своего хода.
+ * `breath` без id — вкладка со списком дыханий, `breath` с id — сессия.
+ * Навык восстанавливается без запуска: экран показывает карточку и кнопку.
+ */
+export const RESUME_SCREENS = {
+  home: () => true,
+  breath: (id) => !id,
+  card: () => true,
+  diary: () => true,
+  topics: () => true,
+  meds: () => true,
+  more: () => true,
+  skill: (id) => Boolean(id),
+};
+
+/**
+ * Пригоден ли экран для возврата. Возвращает экран или null; id берётся
+ * из списка, а не из данных, поэтому чужой id сюда не проскочит.
+ */
+export function resumeScreen(name, id = null) {
+  const ok = RESUME_SCREENS[name];
+  if (!ok || !ok(id)) return null;
+  return { name, id: id ?? null };
+}
+
+/**
+ * Откуда такие экраны открываются. Нужно только для возврата: под экраном
+ * внутри должна быть запись истории, иначе «‹ назад» закрывал бы приложение.
+ */
+export const RESUME_PARENT = { topics: 'diary', meds: 'diary', more: 'home', skill: 'home' };
+
+export function resumeParent(name) {
+  const tab = RESUME_PARENT[name];
+  return tab ? { name: tab, id: null } : HOME;
+}
