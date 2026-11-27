@@ -196,6 +196,13 @@ export const MED_SLOTS = ['morning', 'evening'];
 /** Состояние отметки: ровно два. «Нет отметки» выводится из отсутствия записи. */
 export const MARK_STATES = ['taken', 'skipped'];
 
+/**
+ * Приём «по необходимости»: и режим препарата, и значение slot в отметке.
+ * У такой отметки есть время приёма (`at`) и свой id (`u`), иначе несколько
+ * приёмов одного дня схлопнулись бы при слиянии копий в один.
+ */
+export const ASNEEDED_SLOT = 'asneeded';
+
 function toChange(c) {
   return { ...c, d: txt(c.d), how: txt(c.how) };
 }
@@ -216,7 +223,9 @@ function toMed(m) {
 function toMark(k) {
   // state не подменяем на «taken»: выдуманная отметка хуже отсутствующей.
   // slot '' — прежняя отметка дня целиком, так выглядят все отметки до 0.9.1.
-  return {
+  // at и u есть только у записей 0.12.0: их не выдумываем, но приводим
+  // к строке, если они пришли из копии.
+  const out = {
     ...k,
     d: txt(k.d),
     med: txt(k.med),
@@ -224,6 +233,11 @@ function toMark(k) {
     state: txt(k.state),
     ts: num(k.ts),
   };
+  if (txt(k.at)) out.at = txt(k.at);
+  else delete out.at;
+  if (txt(k.u)) out.u = txt(k.u);
+  else delete out.u;
+  return out;
 }
 
 /**
@@ -436,20 +450,39 @@ function mergeMeds(a = [], b = []) {
  * Отметки приёма: ключ — день, препарат и приём. Без slot в ключе утренняя
  * и вечерняя отметки одного дня схлопнулись бы в одну при импорте копии.
  * При конфликте побеждает более свежая отметка: человек мог исправить
- * «не приняла» на «приняла».
+ * «не принята» на «приняла».
+ *
+ * У приёма «по необходимости» в ключ входит ещё и время: за день их может
+ * быть несколько, и без времени все, кроме последнего, потерялись бы.
+ * Поверх ключа работает `u` — id записи: правка дня или времени меняет
+ * ключ, и без `u` старая копия воскресила бы прежнюю запись рядом с новой.
+ * Записи прежних версий `u` не имеют и сливаются только по ключу.
  */
 function mergeMarks(a = [], b = []) {
   const out = new Map();
+  const byU = new Map();
   for (const list of [a, b]) {
     for (const raw of list) {
       if (!obj(raw) || !txt(raw.d) || !txt(raw.med)) continue;
       const k = toMark(raw);
-      const key = `${k.d}|${k.med}|${k.slot}`;
+      const u = txt(k.u);
+      const own =
+        txt(k.slot) === ASNEEDED_SLOT
+          ? `${k.d}|${k.med}|${ASNEEDED_SLOT}|${txt(k.at)}`
+          : `${k.d}|${k.med}|${k.slot}`;
+      const key = (u && byU.get(u)) || own;
       const prev = out.get(key);
-      if (!prev || num(k.ts) > num(prev.ts)) out.set(key, k);
+      if (prev && num(k.ts) <= num(prev.ts)) continue;
+      out.set(key, k);
+      if (u) byU.set(u, key);
     }
   }
-  return [...out.values()].sort((x, y) => txt(x.d).localeCompare(txt(y.d)));
+  return [...out.values()].sort(
+    (x, y) =>
+      txt(x.d).localeCompare(txt(y.d)) ||
+      txt(x.at).localeCompare(txt(y.at)) ||
+      num(x.ts) - num(y.ts),
+  );
 }
 
 /**

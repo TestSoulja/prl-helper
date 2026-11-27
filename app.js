@@ -50,6 +50,22 @@ import {
   MARKS_TITLE,
   MARK_TAKEN,
   MARK_SKIPPED,
+  ASNEEDED_TAKE,
+  ASNEEDED_ADD,
+  ASNEEDED_AT_LABEL,
+  ASNEEDED_REMOVE,
+  ASNEEDED_TAKE_ARIA,
+  ASNEEDED_EDIT_ARIA,
+  ASNEEDED_PERIOD,
+  ASNEEDED_BAD_TIME,
+  ASNEEDED_BAD_DAY,
+  ASNEEDED_BUSY,
+  ASNEEDED_GONE,
+  MEDS_LEAD_ASNEEDED,
+  INTAKES_TITLE,
+  INTAKES_LINK,
+  INTAKES_LEAD,
+  INTAKES_DAY_LABEL,
   SLEEP_LABEL,
   SLEEP_UNIT,
   SLEEP_NAP,
@@ -238,6 +254,13 @@ import {
   slotsOf,
   sleepText,
   sleepLines,
+  ASNEEDED_PERIOD_DAYS,
+  parseClock,
+  asNeededOfDay,
+  asNeededCount,
+  addAsNeededMark,
+  updateAsNeededMark,
+  removeAsNeededMark,
 } from './meds.js';
 import { planSteps, firstPerson, awayText } from './card.js';
 import { featureOn } from './features.js';
@@ -624,6 +647,10 @@ let versionTapTimer = null;
 // до какого времени идёт «побыть», если с экрана ушли: срок, а не счётчик,
 // поэтому возвращение показывает оставшееся время, а не начинает заново
 let calmUntil = 0;
+// Экран «Приёмы»: выбранный день и открытая правка приёма «по необходимости».
+// Это состояние экрана, а не данные: после перезапуска оно не восстанавливается.
+let intakeDay = '';
+let prnEdit = null;
 
 const view = document.getElementById('view');
 const tabbar = document.getElementById('tabbar');
@@ -663,6 +690,12 @@ const medModeLabel = (mode) => (mode === 'asneeded' ? MED_MODE_ASNEEDED : MED_MO
 /** Подстановка в шаблон из content.js: {name}, {n}, {m}, {names}. */
 const fill = (tpl, vars) =>
   String(tpl).replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+
+/** Время «сейчас» как ЧЧ:ММ: это время приёма, а не момент нажатия. */
+const clockNow = () => {
+  const n = new Date();
+  return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}`;
+};
 
 /** Названия известных навыков через запятую; незнакомые id пропускаем. */
 const namesOf = (ids) =>
@@ -710,56 +743,123 @@ function marksBlock() {
   const active = markableMeds(data.meds);
   if (!active.length) return '';
   const day = dayKey();
-  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-  // Один шаблон кнопки на оба состояния: подписи берутся из content.js,
-  // а не переписываются второй раз в разметке.
-  const button = (m, slot, state, label) => {
-    const word = slot === 'morning' ? SLOT_MORNING : slot === 'evening' ? SLOT_EVENING : '';
-    const aria = word ? ` aria-label="${esc(`${cap(word)}: ${label}`)}"` : '';
-    return `
-          <button class="mark ${markOf(data.marks, day, m.id, slot) === state ? 'on' : ''}"
-            data-act="mark" data-med="${esc(m.id)}" data-slot="${slot}" data-state="${state}"${aria}>
-            ${esc(label)}
-          </button>`;
-  };
   const rows = active
-    .map((m) => {
-      const slots = slotsOf(m);
-      const lines = slots.length
-        ? slots
-            .map(
-              (slot) => `
-          <div class="marks__row">
-            <span class="marks__slot">${esc(
-              slot === 'morning' ? SLOT_MORNING : SLOT_EVENING,
-            )}</span>${button(m, slot, 'taken', MARK_TAKEN)}${button(
-              m,
-              slot,
-              'skipped',
-              MARK_SKIPPED,
-            )}
-          </div>`,
-            )
-            .join('')
-        : `
-          <div class="marks__row">${button(m, '', 'taken', MARK_TAKEN)}${button(
-            m,
-            '',
-            'skipped',
-            MARK_SKIPPED,
-          )}
-          </div>`;
-      return `
-      <div class="marks__med">
-        <div class="marks__name">${esc(m.name)}</div>${lines}
-      </div>`;
-    })
+    .map((m) => (m.mode === 'asneeded' ? asNeededRow(m, day, false) : dailyMarkRow(m, day)))
     .join('');
   return `
     <div class="marks">
       <div class="marks__title">${esc(MARKS_TITLE)}</div>
       ${rows}
     </div>`;
+}
+
+/** Кнопка ежедневной отметки: одно состояние, один приём, один день. */
+function markButton(m, day, slot, state, label) {
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const word = slot === 'morning' ? SLOT_MORNING : slot === 'evening' ? SLOT_EVENING : '';
+  const aria = word ? ` aria-label="${esc(`${cap(word)}: ${label}`)}"` : '';
+  return `
+          <button class="mark ${markOf(data.marks, day, m.id, slot) === state ? 'on' : ''}"
+            data-act="mark" data-med="${esc(m.id)}" data-slot="${slot}"
+            data-day="${esc(day)}" data-state="${state}"${aria}>
+            ${esc(label)}
+          </button>`;
+}
+
+/**
+ * Ежедневная отметка: имя, приёмы и по паре кнопок на каждый. День приходит
+ * снаружи — в дневнике это сегодня, на «Приёмах» выбранный день, и запись
+ * уходит в тот день, который показан на экране.
+ */
+function dailyMarkRow(m, day) {
+  const slots = slotsOf(m);
+  const pair = (slot, word) => `
+          <div class="marks__row">
+            ${word ? `<span class="marks__slot">${esc(word)}</span>` : ''}${markButton(
+              m,
+              day,
+              slot,
+              'taken',
+              MARK_TAKEN,
+            )}${markButton(m, day, slot, 'skipped', MARK_SKIPPED)}
+          </div>`;
+  const lines = slots.length
+    ? slots
+        .map((slot) => pair(slot, slot === 'morning' ? SLOT_MORNING : SLOT_EVENING))
+        .join('')
+    : pair('', '');
+  return `
+      <div class="marks__med">
+        <div class="marks__name">${esc(m.name)}</div>${lines}
+      </div>`;
+}
+
+/**
+ * «По необходимости»: в дневнике — кнопка «принято» и записи сегодняшнего дня,
+ * на «Приёмах» — записи выбранного дня и «+ приём». Чип открывает правку,
+ * а не удаляет: одно нажатие не должно стирать запись молча.
+ */
+function asNeededRow(m, day, withDay) {
+  const list = asNeededOfDay(data.marks, day, m.id);
+  const chips = list
+    .map(
+      (k) => `<button class="chip chip--time" data-act="prn-edit" data-u="${esc(k.u)}"
+        aria-label="${esc(fill(ASNEEDED_EDIT_ARIA, { name: m.name, at: k.at }))}">${esc(k.at)}</button>`,
+    )
+    .join('');
+  const open = withDay ? 'prn-add' : 'prn-take';
+  const label = withDay ? ASNEEDED_ADD : ASNEEDED_TAKE;
+  return `
+      <div class="marks__med">
+        <div class="marks__name">${esc(m.name)}${
+          withDay ? ` · ${esc(MED_MODE_ASNEEDED)}` : ''
+        }</div>
+        <div class="marks__row">
+          <button class="mark mark--wide" data-act="${open}" data-med="${esc(m.id)}"
+            aria-label="${esc(fill(ASNEEDED_TAKE_ARIA, { name: m.name }))}">${esc(label)}</button>
+        </div>
+        ${chips ? `<div class="chips marks__chips">${chips}</div>` : ''}
+        ${asNeededEditor(m, withDay)}
+      </div>`;
+}
+
+/**
+ * Правка приёма: время, на «Приёмах» ещё и день. Открыта одна — другой чип
+ * закрывает первую. `u` не меняется: правка меняет запись, а не заводит новую.
+ */
+function asNeededEditor(m, withDay) {
+  if (!prnEdit || prnEdit.med !== m.id) return '';
+  const isNew = !prnEdit.u;
+  return `
+        <div class="prnform">
+          ${
+            withDay && !isNew
+              ? `<label class="field" for="prn-day">
+            <span>${esc(INTAKES_DAY_LABEL)}</span>
+            <input id="prn-day" type="date" value="${esc(prnEdit.d)}"
+              max="${esc(dayKey())}" data-act="prn-day">
+          </label>`
+              : ''
+          }
+          <label class="field" for="prn-at">
+            <span>${esc(ASNEEDED_AT_LABEL)}</span>
+            <input id="prn-at" type="time" value="${esc(prnEdit.at)}" data-act="prn-at">
+          </label>
+          ${prnEdit.err ? `<div class="prnform__err">${esc(prnEdit.err)}</div>` : ''}
+          <div class="prnform__row">
+            <button class="btn btn--primary btn--small" data-act="prn-save">${esc(MEDS_SAVE)}</button>
+            <button class="btn btn--ghost btn--small" data-act="prn-cancel">${esc(
+              MEDS_CANCEL,
+            )}</button>
+            ${
+              isNew
+                ? ''
+                : `<button class="btn btn--danger btn--small" data-act="prn-del">${esc(
+                    ASNEEDED_REMOVE,
+                  )}</button>`
+            }
+          </div>
+        </div>`;
 }
 
 /**
@@ -896,6 +996,8 @@ function switchTab(name) {
   contactsEdit = false;
   medEdit = null;
   medDraft = null;
+  prnEdit = null;
+  intakeDay = '';
   skillCtx = null;
   stepIdx = 0;
   msgEdit = null;
@@ -937,6 +1039,7 @@ window.addEventListener('popstate', () => {
   contactsEdit = false;
   medEdit = null;
   medDraft = null;
+  prnEdit = null;
   notice = '';
   render();
 
@@ -1677,11 +1780,25 @@ const SCREENS = {
       ]
         .filter(Boolean)
         .join(' · ');
+      // Счётчик — только у действующего «по необходимости»: это факты за
+      // месяц, а не отчёт. Ноль не печатается: строки нет вовсе.
+      const times = !m.stoppedAt && m.mode === 'asneeded' ? asNeededCount(data.marks, m.id) : 0;
 
       return `
         <div class="med ${m.stoppedAt ? 'med--stopped' : ''}">
           <div class="med__name">${esc(m.name)}</div>
           ${meta ? `<div class="med__meta">${esc(meta)}</div>` : ''}
+          ${
+            times
+              ? `<div class="med__meta">${esc(
+                  fill(ASNEEDED_PERIOD, {
+                    days: ASNEEDED_PERIOD_DAYS,
+                    n: times,
+                    word: timesWord(times),
+                  }),
+                )}</div>`
+              : ''
+          }
           ${
             m.stoppedAt
               ? `<div class="med__meta">${esc(
@@ -1755,10 +1872,22 @@ const SCREENS = {
           <h1>${esc(MEDS_TITLE)}</h1>
           <p class="lead">${esc(MEDS_LEAD)}</p>
         </header>
+        ${
+          active.some((m) => m.mode === 'asneeded')
+            ? `<div class="note">${esc(MEDS_LEAD_ASNEEDED)}</div>`
+            : ''
+        }
         ${featureOn('medsExpect') ? `<div class="note">${esc(MEDS_EXPECT)}</div>` : ''}
         ${statusBlock()}
         ${active.map(row).join('')}
         ${!data.meds.length ? `<div class="empty">${esc(MEDS_EMPTY)}</div>` : ''}
+        ${
+          active.length
+            ? `<button class="btn btn--ghost btn--small" data-act="go" data-screen="intakes">
+                 ${esc(INTAKES_LINK)}
+               </button>`
+            : ''
+        }
         ${form()}
         ${
           stopped.length
@@ -1770,6 +1899,33 @@ const SCREENS = {
   },
 
   /* ------------------------------ темы --------------------------- */
+
+  intakes() {
+    const day = intakeDay || dayKey();
+    const active = activeMeds(data.meds);
+
+    return `
+      <div class="screen">
+        <button class="back" data-act="back">‹ назад</button>
+        <header class="head">
+          <div class="eyebrow">дневник</div>
+          <h1>${esc(INTAKES_TITLE)}</h1>
+          <p class="lead">${esc(INTAKES_LEAD)}</p>
+        </header>
+        <label class="field" for="intake-day">
+          <span>${esc(INTAKES_DAY_LABEL)}</span>
+          <input id="intake-day" type="date" value="${esc(day)}" max="${esc(dayKey())}"
+            data-act="intake-day">
+        </label>
+        ${
+          active.length
+            ? `<div class="marks">${active
+                .map((m) => (m.mode === 'asneeded' ? asNeededRow(m, day, true) : dailyMarkRow(m, day)))
+                .join('')}</div>`
+            : `<div class="empty">${esc(MEDS_EMPTY)}</div>`
+        }
+      </div>`;
+  },
 
   topics() {
     const list = tagsWithCounts(data.entries, MOOD_TAGS);
@@ -2764,6 +2920,32 @@ function startCalm(seconds) {
 /*  События                                                           */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Поля `date` и `time` меняются событием `change`, а не тапом: на телефоне
+ * человек выбирает дату в системном календаре, и `click` тут ничего не значит.
+ * Значения только запоминаем: перерисовка на каждую правку выбила бы
+ * фокус из поля.
+ */
+document.addEventListener('change', (e) => {
+  const el = e.target.closest?.('[data-act]');
+  if (!el) return;
+  const act = el.dataset.act;
+  if (act === 'intake-day') {
+    const v = String(el.value || '');
+    // Будущий и пустой день не принимаем: остаётся прежний, ничего не пишем.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || v > dayKey()) {
+      render();
+      return;
+    }
+    intakeDay = v;
+    prnEdit = null;
+    render();
+    return;
+  }
+  if (act === 'prn-day' && prnEdit) prnEdit.d = String(el.value || '');
+  if (act === 'prn-at' && prnEdit) prnEdit.at = String(el.value || '');
+});
+
 document.addEventListener('click', async (e) => {
   const tabEl = e.target.closest('[data-tab]');
   if (tabEl) {
@@ -2784,6 +2966,13 @@ document.addEventListener('click', async (e) => {
       if (el.dataset.screen !== 'meds') {
         medEdit = null;
         medDraft = null;
+      }
+      // правка приёма «по необходимости» живёт только на дневнике и «Приёмах»
+      if (!['diary', 'intakes'].includes(el.dataset.screen)) prnEdit = null;
+      // «Приёмы» открываются на сегодняшнем дне, а не на дне прошлого визита
+      if (el.dataset.screen === 'intakes' && current.name !== 'intakes') {
+        intakeDay = dayKey();
+        prnEdit = null;
       }
       // правка фразы живёт только там, где фразы видны: ушли — она закрыта
       if (!['home', 'contacts'].includes(el.dataset.screen)) {
@@ -3172,10 +3361,11 @@ document.addEventListener('click', async (e) => {
     case 'mark':
       // Строка одна: отметка ставится тому препарату, по которому нажали,
       // а повторный тап тем же состоянием снимает её — нажавшая не то
-      // не должна оказаться запертой.
+      // не должна оказаться запертой. День берём с кнопки: на «Приёмах»
+      // отметка пишется в выбранный день, а не в сегодняшний.
       data.marks = toggleMed(
         data.marks,
-        dayKey(),
+        el.dataset.day || dayKey(),
         el.dataset.med,
         el.dataset.slot || '',
         el.dataset.state,
@@ -3186,6 +3376,118 @@ document.addEventListener('click', async (e) => {
       journal('mark_set', { id: el.dataset.med });
       render();
       break;
+
+    /* ------------------- приём «по необходимости» ------------------ */
+
+    case 'prn-take': {
+      // Быстрая отметка в дневнике: время приёма — сейчас, день — сегодня.
+      const m = data.meds.find((x) => x.id === el.dataset.med);
+      if (!m) break;
+      data.marks = addAsNeededMark(data.marks, m.id, clockNow(), dayKey(), Date.now());
+      save();
+      journal('mark_set', { id: m.id });
+      render();
+      break;
+    }
+
+    case 'prn-add': {
+      // Запись на «Приёмах»: сегодня подставляем текущее время (это и есть
+      // время приёма), в прошлый день — пустое: выдумывать время нельзя.
+      const m = data.meds.find((x) => x.id === el.dataset.med);
+      if (!m) break;
+      const day = intakeDay || dayKey();
+      prnEdit = {
+        med: m.id,
+        u: '',
+        d: day,
+        at: day === dayKey() ? clockNow() : '',
+        err: '',
+      };
+      render();
+      break;
+    }
+
+    case 'prn-edit': {
+      const rec = data.marks.find((k) => k.slot === 'asneeded' && k.u === (el.dataset.u || ''));
+      if (!rec) break;
+      prnEdit = { med: rec.med, u: rec.u, d: rec.d, at: rec.at, err: '' };
+      render();
+      break;
+    }
+
+    case 'prn-cancel':
+      prnEdit = null;
+      render();
+      break;
+
+    case 'prn-del': {
+      if (!prnEdit?.u) break;
+      const med = prnEdit.med;
+      data.marks = removeAsNeededMark(data.marks, prnEdit.u);
+      prnEdit = null;
+      save();
+      journal('mark_set', { id: med });
+      render();
+      break;
+    }
+
+    case 'prn-save': {
+      if (!prnEdit) break;
+      const m = data.meds.find((x) => x.id === prnEdit.med);
+      if (!m) {
+        prnEdit = null;
+        render();
+        break;
+      }
+      const clock = parseClock(document.getElementById('prn-at')?.value || prnEdit.at);
+      const day = String(
+        document.getElementById('prn-day')?.value || prnEdit.d || intakeDay || '',
+      );
+      // что человек ввёл, то и показываем при отказе: форма не должна терять
+      // набранное время из-за перерисовки
+      prnEdit = { ...prnEdit, d: day, at: clock || prnEdit.at };
+      if (!clock) {
+        prnEdit.err = ASNEEDED_BAD_TIME;
+        render();
+        break;
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day > dayKey()) {
+        prnEdit.err = ASNEEDED_BAD_DAY;
+        render();
+        break;
+      }
+      const ts = Date.now();
+      if (!prnEdit.u) {
+        const busy = asNeededOfDay(data.marks, day, m.id).some((k) => k.at === clock);
+        if (busy) {
+          prnEdit.err = ASNEEDED_BUSY;
+          render();
+          break;
+        }
+        data.marks = addAsNeededMark(data.marks, m.id, clock, day, ts);
+      } else {
+        const res = updateAsNeededMark(data.marks, prnEdit.u, { d: day, at: clock }, ts);
+        if (res.error) {
+          const text =
+            res.error === 'busy'
+              ? ASNEEDED_BUSY
+              : res.error === 'clock'
+                ? ASNEEDED_BAD_TIME
+                : res.error === 'day'
+                  ? ASNEEDED_BAD_DAY
+                  : ASNEEDED_GONE;
+          prnEdit = { ...prnEdit, err: text };
+          render();
+          break;
+        }
+        data.marks = res.marks;
+      }
+      prnEdit = null;
+      save();
+      journal('mark_set', { id: m.id });
+      render();
+      break;
+    }
 
     case 'med-add':
       medEdit = 'new';

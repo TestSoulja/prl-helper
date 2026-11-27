@@ -9,10 +9,18 @@
  * отсутствие записи, а не запись со значением «none». Хранить «не
  * отметила» значило бы помнить то, чего человек не делал.
  */
-import { MARK_STATES, MED_SLOTS } from './store.js';
+import { MARK_STATES, MED_SLOTS, ASNEEDED_SLOT } from './store.js';
 
 const txt = (v) => (typeof v === 'string' ? v : '');
 const pad = (n) => String(n).padStart(2, '0');
+const obj = (v) => Boolean(v) && typeof v === 'object';
+
+/**
+ * Горизонт счётчика «за N дней». 30, а не 14: «как часто за месяц» — обычный
+ * вопрос врача. 14 остаётся у дневника и сна, где вопрос другой: «что было»,
+ * а не «сколько раз». Это разные вещи, и одно число на них не годится.
+ */
+export const ASNEEDED_PERIOD_DAYS = 30;
 
 /** Сегодняшний день по местному времени: отметка — про день, а не про миг. */
 export function dayKey(date = new Date()) {
@@ -25,12 +33,12 @@ export function activeMeds(meds = []) {
 }
 
 /**
- * Препараты, у которых есть ежедневная отметка. «По необходимости» сюда не
- * входит: «не приняла» для него ничего не значит — человек не обязан
- * принимать его каждый день, и такой вопрос был бы укором.
+ * Препараты, которым можно поставить отметку. «По необходимости» входит:
+ * у него записывается только факт приёма, и это тоже отметка. Снятые
+ * не входят: новых приёмов у них не бывает, а старые остаются в данных.
  */
 export function markableMeds(meds = []) {
-  return activeMeds(meds).filter((m) => txt(m.mode) !== 'asneeded');
+  return activeMeds(meds);
 }
 
 /** Снятые: «больше не принимаю». Из данных не удаляются никогда. */
@@ -128,6 +136,147 @@ export function toggleMed(
   );
   if (markOf(all, d, id, at) === state) return rest;
   return [...rest, { d, med: id, slot: at, state, ts }];
+}
+
+/**
+ * Время приёма «ЧЧ:ММ» или '' — мусор не превращается в полночь.
+ * Строкой, а не числом: в копии должно стоять ровно то время, которое
+ * человек ввёл, независимо от часового пояса того, кто копию откроет.
+ */
+export function parseClock(value) {
+  const s = txt(value).trim();
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(s) ? s : '';
+}
+
+/** День со сдвигом: '2026-11-27' и -13 → '2026-11-14'. */
+function shiftDay(d, delta) {
+  const [y, m, dd] = txt(d).split('-').map(Number);
+  if (!y || !m || !dd) return '';
+  const date = new Date(y, m - 1, dd);
+  date.setDate(date.getDate() + delta);
+  return dayKey(date);
+}
+
+/**
+ * Id записи «по необходимости». Без случайности: тест должен получать
+ * одно и то же, а совпадение в одну миллисекунду разводится счётным хвостом.
+ */
+export function newMarkId(ts = Date.now(), marks = []) {
+  const base = `u${Number(ts).toString(36)}`;
+  const taken = new Set(
+    (Array.isArray(marks) ? marks : []).map((k) => txt(k?.u)).filter(Boolean),
+  );
+  if (!taken.has(base)) return base;
+  let n = 2;
+  while (taken.has(`${base}-${n}`)) n += 1;
+  return `${base}-${n}`;
+}
+
+/** Приёмы одного дня, по времени: только «принято», мусор не считается. */
+export function asNeededOfDay(marks = [], d = '', medId = '') {
+  return (Array.isArray(marks) ? marks : [])
+    .filter(
+      (k) =>
+        obj(k) &&
+        txt(k.d) === txt(d) &&
+        txt(k.med) === txt(medId) &&
+        txt(k.slot) === ASNEEDED_SLOT &&
+        txt(k.state) === 'taken',
+    )
+    .sort((x, y) => txt(x.at).localeCompare(txt(y.at)) || Number(x.ts) - Number(y.ts));
+}
+
+/**
+ * Сколько раз за последние `days` календарных дней, включая сегодня.
+ * Ноль не печатается: строки нет вовсе. Знаменателя «из 30» нет — это
+ * счёт фактов, а не отчёт об успеваемости.
+ */
+export function asNeededCount(
+  marks = [],
+  medId = '',
+  today = dayKey(),
+  days = ASNEEDED_PERIOD_DAYS,
+) {
+  const to = txt(today);
+  const from = shiftDay(to, -(Math.max(1, days) - 1));
+  if (!from) return 0;
+  return (Array.isArray(marks) ? marks : []).filter(
+    (k) =>
+      obj(k) &&
+      txt(k.med) === medId &&
+      txt(k.slot) === ASNEEDED_SLOT &&
+      txt(k.state) === 'taken' &&
+      txt(k.d) >= from &&
+      txt(k.d) <= to,
+  ).length;
+}
+
+/**
+ * Записать приём: день и время приёма, состояние только «принято».
+ * Повтор в ту же минуту не плодит вторую запись — это один приём.
+ * Возвращает новый массив; вход не меняется.
+ */
+export function addAsNeededMark(marks = [], medId = '', at = '', d = dayKey(), ts = Date.now()) {
+  const id = txt(medId);
+  const clock = parseClock(at);
+  const day = txt(d);
+  const all = Array.isArray(marks) ? marks : [];
+  if (!id || !clock || !day) return all;
+  const same = all.some(
+    (k) =>
+      obj(k) &&
+      txt(k.med) === id &&
+      txt(k.slot) === ASNEEDED_SLOT &&
+      txt(k.d) === day &&
+      txt(k.at) === clock,
+  );
+  if (same) return all;
+  return [
+    ...all,
+    { d: day, med: id, slot: ASNEEDED_SLOT, state: 'taken', at: clock, u: newMarkId(ts, all), ts },
+  ];
+}
+
+/**
+ * Поправить приём: день и время. Запись находится по `u`, а не по ключу, —
+ * поэтому правка меняет ключ, но не добавляет вторую запись. Второе поле
+ * `ts` — момент правки: по нему старая копия с прежним временем проигрывает.
+ *
+ * Возвращает `{ marks, error }`; причины — коды, слова живут в content.js.
+ */
+export function updateAsNeededMark(marks = [], u = '', patch = {}, ts = Date.now()) {
+  const all = Array.isArray(marks) ? marks : [];
+  const id = txt(u);
+  const idx = all.findIndex(
+    (k) => obj(k) && txt(k.u) === id && txt(k.slot) === ASNEEDED_SLOT,
+  );
+  if (!id || idx < 0) return { marks: all, error: 'missing' };
+  const rec = all[idx];
+  const clock = parseClock(patch?.at ?? rec.at);
+  const day = txt(patch?.d ?? rec.d);
+  if (!clock) return { marks: all, error: 'clock' };
+  if (!day) return { marks: all, error: 'day' };
+  const busy = all.some(
+    (k, i) =>
+      i !== idx &&
+      obj(k) &&
+      txt(k.slot) === ASNEEDED_SLOT &&
+      txt(k.med) === txt(rec.med) &&
+      txt(k.d) === day &&
+      txt(k.at) === clock,
+  );
+  if (busy) return { marks: all, error: 'busy' };
+  const next = all.slice();
+  next[idx] = { ...rec, d: day, at: clock, ts };
+  return { marks: next, error: '' };
+}
+
+/** Удалить ровно одну запись по `u`; соседние и ежедневные не трогаются. */
+export function removeAsNeededMark(marks = [], u = '') {
+  const all = Array.isArray(marks) ? marks : [];
+  const id = txt(u);
+  if (!id) return all;
+  return all.filter((k) => !(obj(k) && txt(k.u) === id && txt(k.slot) === ASNEEDED_SLOT));
 }
 
 /**
